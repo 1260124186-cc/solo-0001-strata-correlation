@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "name": "solo-0003-strata-correlation",
+  "name": "solo-0001-strata-correlation",
   "project_shape": "backend",
   "modules": [
     {

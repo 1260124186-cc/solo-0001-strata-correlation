@@ -2,9 +2,9 @@ package catalog
 
 import (
 	"context"
-	"github.com/1260124186-cc/solo-0003-strata-correlation/internal/correlation"
-	"github.com/1260124186-cc/solo-0003-strata-correlation/internal/geology"
-	"github.com/1260124186-cc/solo-0003-strata-correlation/internal/persistence"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/persistence"
 )
 
 func (s *Service) Point(ctx context.Context, id string, version int, depth int64) (geology.Point, error) {

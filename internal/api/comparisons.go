@@ -2,7 +2,7 @@ package api
 
 import (
 	"bytes"
-	"github.com/1260124186-cc/solo-0003-strata-correlation/internal/correlation"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
 	"net/http"
 )
 
