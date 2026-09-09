@@ -1,0 +1,27 @@
+{
+  "language": "go",
+  "project_shape": "backend",
+  "source_extensions": [
+    ".go"
+  ],
+  "build_command": "go build ./...",
+  "testing": "deferred",
+  "workflow_checks": [
+    {
+      "workflow_id": "record",
+      "command": "python3 scripts/smoke.py record"
+    },
+    {
+      "workflow_id": "seal",
+      "command": "python3 scripts/smoke.py seal"
+    },
+    {
+      "workflow_id": "compare",
+      "command": "python3 scripts/smoke.py compare"
+    },
+    {
+      "workflow_id": "browse",
+      "command": "python3 scripts/smoke.py browse"
+    }
+  ]
+}

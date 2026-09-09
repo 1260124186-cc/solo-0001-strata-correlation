@@ -1,0 +1,128 @@
+{
+  "schema_version": 1,
+  "name": "solo-0003-strata-correlation",
+  "project_shape": "backend",
+  "modules": [
+    {
+      "id": "entry",
+      "path": "cmd/stratad",
+      "responsibility": "service lifecycle"
+    },
+    {
+      "id": "api",
+      "path": "internal/api",
+      "responsibility": "HTTP protocol"
+    },
+    {
+      "id": "catalog",
+      "path": "internal/catalog",
+      "responsibility": "profile workflows"
+    },
+    {
+      "id": "geology",
+      "path": "internal/geology",
+      "responsibility": "depth and state rules"
+    },
+    {
+      "id": "correlation",
+      "path": "internal/correlation",
+      "responsibility": "interval alignment"
+    },
+    {
+      "id": "persistence",
+      "path": "internal/persistence",
+      "responsibility": "atomic snapshots and recovery"
+    },
+    {
+      "id": "config",
+      "path": "internal/config",
+      "responsibility": "runtime configuration"
+    }
+  ],
+  "complexity": {
+    "mechanisms": [
+      "state_transition",
+      "error_propagation",
+      "resource_lifecycle",
+      "concurrency"
+    ]
+  },
+  "workflows": [
+    {
+      "id": "record",
+      "name": "编录",
+      "entry": "POST /api/v1/profiles",
+      "steps": [
+        "validate metadata",
+        "replace layers",
+        "inspect coverage"
+      ],
+      "success": "profile and layers persisted",
+      "failure": "invalid depth rejected",
+      "verification": "bounded HTTP workflow smoke check",
+      "module_ids": [
+        "api",
+        "catalog",
+        "geology",
+        "persistence"
+      ]
+    },
+    {
+      "id": "seal",
+      "name": "锁定修订",
+      "entry": "POST /api/v1/profiles/{id}/seal",
+      "steps": [
+        "verify coverage",
+        "seal revision",
+        "reopen and retain history"
+      ],
+      "success": "immutable revision remains available",
+      "failure": "gaps or stale version rejected",
+      "verification": "bounded HTTP workflow smoke check",
+      "module_ids": [
+        "api",
+        "catalog",
+        "geology",
+        "persistence"
+      ]
+    },
+    {
+      "id": "compare",
+      "name": "剖面对比",
+      "entry": "POST /api/v1/comparisons",
+      "steps": [
+        "load sealed revisions",
+        "align intervals",
+        "persist result"
+      ],
+      "success": "deterministic interval comparison",
+      "failure": "unsealed or nonoverlapping input rejected",
+      "verification": "bounded HTTP workflow smoke check",
+      "module_ids": [
+        "api",
+        "catalog",
+        "correlation",
+        "persistence"
+      ]
+    },
+    {
+      "id": "browse",
+      "name": "查阅",
+      "entry": "GET /api/v1/profiles",
+      "steps": [
+        "validate filters",
+        "select profiles",
+        "paginate revisions and export comparison"
+      ],
+      "success": "filtered profiles and CSV returned",
+      "failure": "invalid filters rejected",
+      "verification": "bounded HTTP workflow smoke check",
+      "module_ids": [
+        "api",
+        "catalog",
+        "geology",
+        "persistence"
+      ]
+    }
+  ]
+}
