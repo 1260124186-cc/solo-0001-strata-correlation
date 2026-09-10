@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"io"
 	"os"
 	"path/filepath"
@@ -44,6 +45,10 @@ func readSnapshot(path string) (State, error) {
 	var state State
 	if err = json.Unmarshal(env.Data, &state); err != nil {
 		return State{}, err
+	}
+	if state.Annotations == nil {
+		// 兼容注记功能引入前写出的快照。
+		state.Annotations = map[string]geology.Annotation{}
 	}
 	if err = state.Validate(); err != nil {
 		return State{}, fmt.Errorf("snapshot validation: %w", err)

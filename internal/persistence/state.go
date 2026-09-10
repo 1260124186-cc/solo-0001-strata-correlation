@@ -12,10 +12,16 @@ type State struct {
 	Schema      int                           `json:"schema"`
 	Histories   map[string][]geology.Revision `json:"histories"`
 	Comparisons map[string]correlation.Result `json:"comparisons"`
+	Annotations map[string]geology.Annotation `json:"annotations,omitempty"`
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{
+		Schema:      1,
+		Histories:   map[string][]geology.Revision{},
+		Comparisons: map[string]correlation.Result{},
+		Annotations: map[string]geology.Annotation{},
+	}
 }
 
 func (s State) Clone() State {
@@ -29,6 +35,9 @@ func (s State) Clone() State {
 	}
 	for id, result := range s.Comparisons {
 		out.Comparisons[id] = result.Clone()
+	}
+	for id, annotation := range s.Annotations {
+		out.Annotations[id] = annotation.Clone()
 	}
 	return out
 }
@@ -52,10 +61,25 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 	return history[version-1].Clone(), nil
 }
 
+func (s State) Annotation(id string) (geology.Annotation, error) {
+	annotation, ok := s.Annotations[id]
+	if !ok {
+		return geology.Annotation{}, geology.Missing("注记不存在")
+	}
+	return annotation.Clone(), nil
+}
+
+// AnnotationTargetRevision 解析注记锚定的历史版本；注记与分层相互独立，
+// 这里只读取历史，剖面产生新版本不会改变锚点。
+func (s State) AnnotationTargetRevision(t geology.AnnotationTarget) (geology.Revision, error) {
+	return s.Revision(t.ProfileID, t.Version)
+}
+
 func (s State) Validate() error {
 	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
 		return fmt.Errorf("unsupported snapshot shape")
 	}
+	// 早于注记功能的快照没有 annotations 映射，按空集合对待。
 	for id, history := range s.Histories {
 		if len(history) == 0 {
 			return fmt.Errorf("empty history %s", id)
@@ -105,6 +129,21 @@ func (s State) Validate() error {
 		actual, _ := json.Marshal(result)
 		if string(expected) != string(actual) {
 			return fmt.Errorf("comparison data mismatch")
+		}
+	}
+	for id, annotation := range s.Annotations {
+		if id != annotation.ID {
+			return fmt.Errorf("invalid annotation identity %s", id)
+		}
+		if err := annotation.Validate(); err != nil {
+			return fmt.Errorf("invalid annotation %s: %w", id, err)
+		}
+		target, err := s.AnnotationTargetRevision(annotation.Target)
+		if err != nil {
+			return fmt.Errorf("annotation %s target: %w", id, err)
+		}
+		if err := geology.ValidateTarget(annotation.Target, target.Profile); err != nil {
+			return fmt.Errorf("annotation %s target: %w", id, err)
 		}
 	}
 	return nil

@@ -243,11 +243,118 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def annotate(s):
+    # 从未锁定的剖面不能加注记
+    draft = create(s, '待锁定剖面')
+    target = dict(profile_id=draft['id'], version=1, kind='point', depth_mm=1000)
+    s.call('POST', '/api/v1/annotations',
+           dict(target=target, title='标志层线索', body='疑似凝灰岩', reason='初步判断'), 409)
+
+    # 历史中先有锁定修订（v3），重新打开后产生带缺口的草拟修订（v5）；
+    # 历史修订不可变，允许把注记锚定到 v5 并指出当时的缺口
+    gp = create(s, '缺口剖面')
+    gp = state(s, replace(s, gp, layers()), 'seal')
+    assert gp['version'] == 3
+    gp = state(s, gp, 'reopen')
+    gappy = replace(s, gp, [dict(top_mm=2000, bottom_mm=8000, rock='sandstone')])
+    assert gappy['version'] == 5
+
+    gap_target = dict(profile_id=gappy['id'], version=5, kind='point', depth_mm=1000)
+    gap_note = s.call('POST', '/api/v1/annotations',
+                      dict(target=gap_target, title='顶部缺口', body='缺失 0–2 米记录', reason='编录备注'), 201)
+    assert gap_note['target'] == gap_target
+    assert gap_note['revision_chain'][0]['status'] == 'draft'
+    assert gap_note['coverage']['segments'][0]['kind'] == 'gap'
+    assert gap_note['coverage']['gaps'] == [dict(top_mm=0, bottom_mm=2000)]
+
+    # 区间注记跨分层与缺口，应按边界切分
+    span_target = dict(profile_id=gappy['id'], version=5, kind='interval', top_mm=1000, bottom_mm=9000)
+    span_note = s.call('POST', '/api/v1/annotations',
+                       dict(target=span_target, title='过渡段', body='砂泥过渡', reason='对比用'), 201)
+    kinds = [(seg['kind'], seg['top_mm'], seg['bottom_mm']) for seg in span_note['coverage']['segments']]
+    assert kinds == [('gap', 1000, 2000), ('layer', 2000, 8000), ('gap', 8000, 9000)], kinds
+    assert span_note['coverage']['gaps'] == [dict(top_mm=1000, bottom_mm=2000), dict(top_mm=8000, bottom_mm=9000)]
+
+    # 完整锁定版本上的点注记：边界点属于其下方分层
+    p = sealed(s, '标准剖面')
+    locked_target = dict(profile_id=p['id'], version=3, kind='point', depth_mm=4000)
+    note = s.call('POST', '/api/v1/annotations',
+                  dict(target=locked_target, title='凝灰标志', body='层位标志，可作对比依据', reason='野外确认'), 201)
+    assert note['coverage']['segments'][0]['kind'] == 'layer'
+    assert note['coverage']['segments'][0]['layer']['rock'] == 'mudstone'
+
+    # 输入边界
+    s.call('POST', '/api/v1/annotations',
+           dict(target=dict(profile_id=p['id'], version=3, kind='point', depth_mm=10000),
+                title='越界', body='x', reason='x'), 422)
+    s.call('POST', '/api/v1/annotations',
+           dict(target=dict(profile_id=p['id'], version=99, kind='point', depth_mm=10),
+                title='无版本', body='x', reason='x'), 404)
+    s.call('POST', '/api/v1/annotations',
+           dict(target=locked_target, title='', body='x', reason='x'), 422)
+    s.call('POST', '/api/v1/annotations',
+           dict(target=locked_target, title='未知字段', body='x', reason='x', extra=1), 422)
+
+    # 草拟修订可以追加内容修订，历史修订原样保留
+    revised = s.call('PUT', f"/api/v1/annotations/{note['id']}",
+                     dict(title='凝灰标志层', body='更新后的解释', reason='补充薄片结果'), 200)
+    assert [r['revision'] for r in revised['revision_chain']] == [1, 2]
+    assert revised['revision_chain'][0]['title'] == '凝灰标志'
+    assert revised['revision_chain'][1]['title'] == '凝灰标志层'
+
+    # 定稿后修改被拒绝，确认修订不被覆盖
+    confirmed = s.call('POST', f"/api/v1/annotations/{note['id']}/confirm",
+                       dict(reason='组长复核通过'), 200)
+    assert confirmed['revision_chain'][-1]['status'] == 'confirmed'
+    assert confirmed['revision_chain'][-1]['action'] == 'confirm'
+    frozen = confirmed['revision_chain']
+    s.call('PUT', f"/api/v1/annotations/{note['id']}",
+           dict(title='试图覆盖', body='不应成功', reason='x'), 409)
+    s.call('POST', f"/api/v1/annotations/{note['id']}/confirm", dict(reason='重复确认'), 409)
+    again = s.call('GET', f"/api/v1/annotations/{note['id']}")
+    assert again['revision_chain'] == frozen
+
+    # 重新打开追加草拟修订，定稿链完整保留
+    reopened = s.call('POST', f"/api/v1/annotations/{note['id']}/reopen",
+                      dict(reason='新资料需要修正'), 200)
+    assert [r['revision'] for r in reopened['revision_chain']] == [1, 2, 3, 4]
+    assert reopened['revision_chain'][2]['status'] == 'confirmed'
+    assert reopened['revision_chain'][3]['status'] == 'draft'
+    s.call('POST', f"/api/v1/annotations/{note['id']}/reopen", dict(reason='再次打开'), 409)
+
+    # 注记独立于剖面：重新打开并改动分层产生新版本，注记仍锚定 v3 且覆盖不变
+    p = state(s, p, 'reopen')
+    p = replace(s, p, [dict(top_mm=0, bottom_mm=3000, rock='limestone'),
+                       dict(top_mm=3000, bottom_mm=10000, rock='shale')])
+    state(s, p, 'seal')
+    unchanged = s.call('GET', f"/api/v1/annotations/{note['id']}")
+    assert unchanged['target'] == locked_target
+    assert unchanged['coverage']['segments'][0]['layer']['rock'] == 'mudstone'
+
+    # 列表与筛选
+    page = s.call('GET', f"/api/v1/annotations?profile_id={gappy['id']}")
+    assert page['total'] == 2
+    page = s.call('GET', '/api/v1/annotations?status=confirmed')
+    assert page['total'] == 0
+    page = s.call('GET', '/api/v1/annotations?status=draft&limit=1')
+    assert page['total'] == 3 and len(page['items']) == 1
+    for query in ['status=absent', 'limit=0', 'extra=1']:
+        s.call('GET', '/api/v1/annotations?'+query, expected=422)
+    s.call('GET', '/api/v1/annotations?profile_id=prf_'+'0'*32, expected=404)
+    s.call('GET', '/api/v1/annotations/ant_'+'0'*32, expected=404)
+
+    # 重启后注记、修订链与覆盖一致
+    s.stop()
+    s.start()
+    assert s.call('GET', f"/api/v1/annotations/{note['id']}") == unchanged
+    assert s.call('GET', f"/api/v1/annotations/{gap_note['id']}") == gap_note
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'annotate', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'annotate'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

@@ -123,6 +123,25 @@
         "geology",
         "persistence"
       ]
+    },
+    {
+      "id": "annotate",
+      "name": "深度注记",
+      "entry": "POST /api/v1/annotations",
+      "steps": [
+        "anchor a historical revision",
+        "append draft revisions and confirm",
+        "resolve covered layers and gaps"
+      ],
+      "success": "immutable annotation chain reports anchored coverage",
+      "failure": "confirmed revision cannot be overwritten",
+      "verification": "bounded HTTP workflow smoke check",
+      "module_ids": [
+        "api",
+        "catalog",
+        "geology",
+        "persistence"
+      ]
     }
   ]
 }
