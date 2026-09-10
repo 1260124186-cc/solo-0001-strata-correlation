@@ -4,10 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"time"
+
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/persistence"
-	"strings"
-	"time"
 )
 
 type Service struct{ repo *persistence.Repository }
@@ -20,14 +20,6 @@ func newID() (string, error) {
 		return "", err
 	}
 	return "prf_" + hex.EncodeToString(bytes), nil
-}
-
-func nextTime(previous time.Time) time.Time {
-	now := time.Now().UTC()
-	if now.Before(previous) {
-		return previous
-	}
-	return now
 }
 
 func (s *Service) Create(ctx context.Context, metadata geology.Metadata) (geology.Profile, error) {
@@ -78,26 +70,6 @@ func (s *Service) List(ctx context.Context, f geology.Filter) (geology.Page, err
 		return nil
 	})
 	return result, err
-}
-
-func normalizedReason(reason string) (string, error) {
-	reason = strings.TrimSpace(reason)
-	return reason, geology.Text("reason", reason, 1, 500)
-}
-
-func appendRevision(state *persistence.State, revision geology.Revision) error {
-	history := state.Histories[revision.Profile.ID]
-	if len(history) >= 500 {
-		return geology.Conflict("单个剖面最多保留 500 个版本")
-	}
-	if revision.Profile.Version != len(history)+1 {
-		return geology.Conflict("版本顺序不一致")
-	}
-	if err := revision.Profile.Validate(); err != nil {
-		return err
-	}
-	state.Histories[revision.Profile.ID] = append(history, revision.Clone())
-	return nil
 }
 
 func (s *Service) Health() error { return s.repo.Health() }
