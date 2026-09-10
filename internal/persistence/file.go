@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/collection"
 	"io"
 	"os"
 	"path/filepath"
@@ -44,6 +45,10 @@ func readSnapshot(path string) (State, error) {
 	var state State
 	if err = json.Unmarshal(env.Data, &state); err != nil {
 		return State{}, err
+	}
+	// 集合功能引入前的快照没有 collections 字段，按空表处理。
+	if state.Collections == nil {
+		state.Collections = map[string]collection.Collection{}
 	}
 	if err = state.Validate(); err != nil {
 		return State{}, fmt.Errorf("snapshot validation: %w", err)

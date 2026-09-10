@@ -3,19 +3,21 @@ package persistence
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/collection"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"reflect"
 )
 
 type State struct {
-	Schema      int                           `json:"schema"`
-	Histories   map[string][]geology.Revision `json:"histories"`
-	Comparisons map[string]correlation.Result `json:"comparisons"`
+	Schema      int                              `json:"schema"`
+	Histories   map[string][]geology.Revision    `json:"histories"`
+	Comparisons map[string]correlation.Result    `json:"comparisons"`
+	Collections map[string]collection.Collection `json:"collections"`
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}, Collections: map[string]collection.Collection{}}
 }
 
 func (s State) Clone() State {
@@ -29,6 +31,9 @@ func (s State) Clone() State {
 	}
 	for id, result := range s.Comparisons {
 		out.Comparisons[id] = result.Clone()
+	}
+	for id, c := range s.Collections {
+		out.Collections[id] = c.Clone()
 	}
 	return out
 }
@@ -52,8 +57,16 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 	return history[version-1].Clone(), nil
 }
 
+func (s State) Collection(id string) (collection.Collection, error) {
+	c, ok := s.Collections[id]
+	if !ok {
+		return collection.Collection{}, geology.Missing("集合不存在")
+	}
+	return c.Clone(), nil
+}
+
 func (s State) Validate() error {
-	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
+	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil || s.Collections == nil {
 		return fmt.Errorf("unsupported snapshot shape")
 	}
 	for id, history := range s.Histories {
@@ -105,6 +118,23 @@ func (s State) Validate() error {
 		actual, _ := json.Marshal(result)
 		if string(expected) != string(actual) {
 			return fmt.Errorf("comparison data mismatch")
+		}
+	}
+	for id, c := range s.Collections {
+		if id != c.ID {
+			return fmt.Errorf("invalid collection identity")
+		}
+		if err := c.Validate(); err != nil {
+			return fmt.Errorf("invalid collection %s: %w", id, err)
+		}
+		for _, m := range c.Members {
+			revision, err := s.Revision(m.ProfileID, m.Version)
+			if err != nil {
+				return fmt.Errorf("invalid collection %s member: %w", id, err)
+			}
+			if revision.Profile.State != geology.Sealed {
+				return fmt.Errorf("collection %s member %s/%d is not sealed", id, m.ProfileID, m.Version)
+			}
 		}
 	}
 	return nil

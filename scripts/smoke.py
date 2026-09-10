@@ -94,7 +94,7 @@ class Server:
             payload = response.read()
             if response.status != expected:
                 raise RuntimeError(f'{method} {path}: expected {expected}, got {response.status}: {payload.decode()}')
-        return payload.decode() if raw else json.loads(payload)
+        return payload.decode() if raw else (json.loads(payload) if payload else None)
 
 
 def create(s, name='北坡剖面', site='赤石岭', depth=10000):
@@ -243,11 +243,73 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def collect(s):
+    a, b = sealed(s, '专题西剖面'), sealed(s, '专题东剖面', 6000)
+    members = [dict(profile_id=a['id'], version=3, purpose='西段标准层序'),
+               dict(profile_id=b['id'], version=3, purpose='东段对比层序')]
+    c = s.call('POST', '/api/v1/collections', dict(name='赤石岭专题', description='统一对比基准', members=members), 201)
+    assert c['version'] == 1 and [m['profile_id'] for m in c['members']] == [a['id'], b['id']]
+    draft = create(s, '草拟剖面')
+    bad = dict(name='无效集合', description='', members=[dict(profile_id=draft['id'], version=1, purpose='草拟版本')])
+    s.call('POST', '/api/v1/collections', bad, 409)
+    bad['members'] = [dict(profile_id=a['id'], version=9, purpose='缺失版本')]
+    s.call('POST', '/api/v1/collections', bad, 404)
+    bad['members'] = [members[0], dict(profile_id=a['id'], version=3, purpose='重复版本')]
+    s.call('POST', '/api/v1/collections', bad, 422)
+    s.call('POST', '/api/v1/collections', dict(name='空集合', description='', members=[]), 422)
+    assert s.call('GET', f'/api/v1/collections/{c["id"]}') == c
+    page = s.call('GET', '/api/v1/collections?'+urllib.parse.urlencode(dict(q='赤石')))
+    assert page['total'] == 1 and page['items'][0]['id'] == c['id']
+    assert s.call('GET', f'/api/v1/collections?profile_id={b["id"]}')['total'] == 1
+    assert s.call('GET', f'/api/v1/collections?profile_id={draft["id"]}')['items'] == []
+    s.call('GET', '/api/v1/collections?site=x', expected=422)
+    edited = s.call('PUT', f'/api/v1/collections/{c["id"]}',
+                    dict(expected_version=1, name='赤石岭专题修订', description=c['description'], members=list(reversed(members))))
+    assert edited['version'] == 2 and edited['members'][0]['profile_id'] == b['id']
+    stale = dict(expected_version=1, name='过期版本', description='', members=members)
+    s.call('PUT', f'/api/v1/collections/{c["id"]}', stale, 409)
+    def rename(name):
+        body = dict(expected_version=2, name=name, description='', members=members)
+        request = urllib.request.Request(s.url+f'/api/v1/collections/{c["id"]}', method='PUT',
+                    data=json.dumps(body).encode(), headers={'Content-Type': 'application/json'})
+        try:
+            response = urllib.request.urlopen(request, timeout=10)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            response.read()
+            return response.status
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        codes = list(pool.map(rename, ['并发甲', '并发乙']))
+    assert sorted(codes) == [200, 409], codes
+    current = s.call('GET', f'/api/v1/collections/{c["id"]}')
+    assert current['version'] == 3
+    request = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
+    result = s.call('POST', '/api/v1/comparisons', request, 201)
+    state(s, a, 'reopen')
+    assert s.call('GET', f'/api/v1/collections/{c["id"]}') == current
+    locked = s.call('GET', f'/api/v1/profiles/{a["id"]}/revisions/3')
+    assert locked['profile']['state'] == 'sealed'
+    s.stop()
+    s.start()
+    assert s.call('GET', f'/api/v1/collections/{c["id"]}') == current
+    s.call('DELETE', f'/api/v1/collections/{c["id"]}', dict(expected_version=2), 409)
+    s.call('DELETE', f'/api/v1/collections/{c["id"]}', dict(expected_version=3), 204)
+    s.call('GET', f'/api/v1/collections/{c["id"]}', expected=404)
+    assert s.call('GET', f'/api/v1/profiles/{a["id"]}')['version'] == 4
+    assert s.call('GET', f'/api/v1/profiles/{a["id"]}/revisions/3') == locked
+    assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+    s.stop()
+    s.start()
+    assert s.call('GET', f'/api/v1/collections/{c["id"]}', expected=404)
+    assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'collect', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'collect'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

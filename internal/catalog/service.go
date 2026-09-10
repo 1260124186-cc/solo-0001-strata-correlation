@@ -14,12 +14,12 @@ type Service struct{ repo *persistence.Repository }
 
 func New(repo *persistence.Repository) *Service { return &Service{repo: repo} }
 
-func newID() (string, error) {
+func newID(prefix string) (string, error) {
 	bytes := make([]byte, 16)
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}
-	return "prf_" + hex.EncodeToString(bytes), nil
+	return prefix + hex.EncodeToString(bytes), nil
 }
 
 func nextTime(previous time.Time) time.Time {
@@ -35,7 +35,7 @@ func (s *Service) Create(ctx context.Context, metadata geology.Metadata) (geolog
 	if err != nil {
 		return geology.Profile{}, err
 	}
-	id, err := newID()
+	id, err := newID("prf_")
 	if err != nil {
 		return geology.Profile{}, err
 	}
