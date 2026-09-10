@@ -243,11 +243,83 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def backup(s):
+    a, b = sealed(s, '备份西剖面'), sealed(s, '备份东剖面', 6000)
+    request = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
+    result = s.call('POST', '/api/v1/comparisons', request, 201)
+    created = s.call('POST', '/api/v1/backups', dict(note='每日恢复点'), 201)
+    bid = created['id']
+    summary = created['summary']
+    assert (summary['profiles'], summary['revisions'], summary['comparisons']) == (2, 6, 1)
+    assert len(summary['sha256']) == 64 and created['size_bytes'] > 0
+    assert (s.directory / 'data' / 'backups' / f'{bid}.json').is_file()
+    s.call('POST', '/api/v1/backups', dict(note='x', extra=1), 422)
+    s.call('POST', '/api/v1/backups', dict(note='长' * 501), 422)
+    page = s.call('GET', '/api/v1/backups')
+    assert page['total'] == 1 and page['items'][0]['id'] == bid and page['items'][0]['valid']
+    s.call('GET', '/api/v1/backups?extra=1', expected=422)
+    detail = s.call('GET', f'/api/v1/backups/{bid}')
+    assert detail['valid'] and detail['checks'] == dict(digest_ok=True, state_ok=True, summary_ok=True)
+    preview = s.call('GET', f'/api/v1/backups/{bid}/preview')
+    assert sorted(p['id'] for p in preview['profiles']) == sorted([a['id'], b['id']])
+    assert [c['id'] for c in preview['comparisons']] == [result['id']]
+    s.call('POST', f'/api/v1/backups/{bid}/restore', dict(), 422)
+    s.call('POST', f'/api/v1/backups/{bid}/restore', dict(confirm_id='bak_' + '0' * 24), 422)
+    extra = create(s, '恢复前新增')
+    restored = s.call('POST', f'/api/v1/backups/{bid}/restore', dict(confirm_id=bid))
+    assert restored['backup_id'] == bid and restored['summary']['profiles'] == 2
+    s.call('GET', f'/api/v1/profiles/{extra["id"]}', expected=404)
+    assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+    s.call('GET', '/healthz')
+    reopened = s.call('POST', f'/api/v1/profiles/{a["id"]}/reopen', dict(expected_version=3, reason='恢复后续写'))
+    assert reopened['version'] == 4
+    assert s.call('GET', f'/api/v1/profiles/{a["id"]}/history')['total'] == 4
+    s.stop()
+    s.start()
+    assert s.call('GET', f'/api/v1/profiles/{a["id"]}')['version'] == 4
+    assert s.call('GET', f'/api/v1/backups/{bid}')['valid']
+
+    def create_quiet(i):
+        return s.call('POST', '/api/v1/profiles', dict(name=f'并发剖面{i}', site='赤石岭', depth_mm=1000), 201)
+
+    def restore_quiet():
+        return s.call('POST', f'/api/v1/backups/{bid}/restore', dict(confirm_id=bid), 200)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(create_quiet, i) for i in range(6)] + [pool.submit(restore_quiet)]
+        for future in futures:
+            future.result()
+    s.call('GET', '/healthz')
+    for item in s.call('GET', '/api/v1/profiles?limit=100')['items']:
+        assert s.call('GET', f'/api/v1/profiles/{item["id"]}/history')['total'] == item['version']
+    s.stop()
+    s.start()
+    s.call('GET', '/healthz')
+    damaged = s.call('POST', '/api/v1/backups', dict(note='将被损坏'), 201)
+    before = s.call('GET', '/api/v1/profiles?limit=100')['total']
+    damaged_file = s.directory / 'data' / 'backups' / f'{damaged["id"]}.json'
+    content = json.loads(damaged_file.read_text())
+    content['digest'] = '0' * 64
+    damaged_file.write_text(json.dumps(content))
+    check = s.call('GET', f'/api/v1/backups/{damaged["id"]}')
+    assert not check['valid'] and not check['checks']['digest_ok']
+    s.call('POST', f'/api/v1/backups/{damaged["id"]}/restore', dict(confirm_id=damaged['id']), 409)
+    s.call('GET', f'/api/v1/backups/{damaged["id"]}/preview', expected=409)
+    assert s.call('GET', '/api/v1/profiles?limit=100')['total'] == before
+    listed = s.call('GET', '/api/v1/backups?limit=100')
+    assert listed['total'] == 2 and sorted(x['valid'] for x in listed['items']) == [False, True]
+    s.call('GET', '/api/v1/backups/bak_..', expected=422)
+    s.call('GET', '/api/v1/backups/not-a-backup', expected=422)
+    s.call('GET', f'/api/v1/backups/bak_{"0" * 24}', expected=404)
+    s.call('GET', '/api/v1/backups/bak_%2Fetc%2Fpasswd', expected=422)
+    assert sorted(p.name for p in (s.directory / 'data').iterdir()) == ['backups', 'strata.json', 'strata.lock']
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'backup', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'backup'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

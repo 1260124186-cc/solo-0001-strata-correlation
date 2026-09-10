@@ -51,8 +51,6 @@ func readSnapshot(path string) (State, error) {
 	return state, nil
 }
 
-// A rename is the commit point. After it, callers must use the new state even
-// when syncing the directory reports an error.
 func writeSnapshot(path string, state State) (committed bool, err error) {
 	raw, err := json.Marshal(state)
 	if err != nil {
@@ -66,7 +64,12 @@ func writeSnapshot(path string, state State) (committed bool, err error) {
 	if len(contents) > maxSnapshot {
 		return false, fmt.Errorf("snapshot capacity of 64 MiB reached")
 	}
-	dir := filepath.Dir(path)
+	return writeFileAtomic(filepath.Dir(path), filepath.Base(path), contents)
+}
+
+// A rename is the commit point. After it, callers must use the new state even
+// when syncing the directory reports an error.
+func writeFileAtomic(dir, name string, contents []byte) (committed bool, err error) {
 	f, err := os.CreateTemp(dir, ".strata-*")
 	if err != nil {
 		return false, err
@@ -90,7 +93,7 @@ func writeSnapshot(path string, state State) (committed bool, err error) {
 	if closeErr != nil {
 		return false, closeErr
 	}
-	if err = os.Rename(temporary, path); err != nil {
+	if err = os.Rename(temporary, filepath.Join(dir, name)); err != nil {
 		return false, err
 	}
 	d, err := os.Open(dir)

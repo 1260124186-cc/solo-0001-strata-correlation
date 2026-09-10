@@ -92,6 +92,31 @@ func (r *Repository) Update(ctx context.Context, fn func(*State) (bool, error)) 
 	return nil
 }
 
+// Restore replaces the whole state with a validated backup. The write lock
+// is held for the full swap so concurrent writes cannot mix with the
+// restored state. A failure before the commit point keeps the original
+// memory and disk state untouched; after a successful restore memory, disk
+// and health are consistent again and any previous fault is cleared.
+func (r *Repository) Restore(ctx context.Context, state State) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return fmt.Errorf("repository closed")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	committed, err := writeSnapshot(r.path, state)
+	if committed {
+		r.state = state
+		r.fault = err
+	}
+	if err != nil {
+		return fmt.Errorf("restore snapshot: %w", err)
+	}
+	return nil
+}
+
 func (r *Repository) Health() error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

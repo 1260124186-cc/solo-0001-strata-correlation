@@ -31,8 +31,12 @@ func run() error {
 		return err
 	}
 	defer repo.Close()
+	backups, err := persistence.OpenBackups(c.BackupsDir)
+	if err != nil {
+		return err
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	handler := api.New(catalog.New(repo), logger)
+	handler := api.New(catalog.New(repo, backups), logger)
 	listener, err := net.Listen("tcp", c.Addr)
 	if err != nil {
 		return err
