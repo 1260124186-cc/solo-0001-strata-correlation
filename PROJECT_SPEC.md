@@ -13,9 +13,10 @@
 3. 对比：选定两个已经锁定的历史版本，指定右侧深度偏移，按双方边界切分共同区间，计算岩性相同长度和比例，保存不可变结果。相同输入复用同一结果。
 对比辅助接口 POST /api/v1/comparison-offsets 使用共同标志层所需偏移的中位数提供建议，并输出残差，用户显式采纳后才生成结果。
 4. 查阅：按岩性、地点、名称和状态筛选剖面，分页读取历史事件与分层；读取对比结果的 JSON 或 CSV。GET /profiles/{id}/at 可查询当前或历史版本中的某一深度；GET /profiles/{id}/diff 按区间和元数据字段展示历史差异。
+5. 术语辅助：维护岩性术语表（术语、解释、对应标准岩性、启用状态），把编录者的不同说法批量解析为固定岩性代码。解析为只读辅助，报告未知词和冲突词而不猜测归类；术语变更只影响后续辅助录入，历史分层和已保存的对比结果保持原样。
 
 ## 模块与接口
-cmd/stratad 提供启动入口。internal/api 处理 HTTP；internal/catalog 编排剖面工作流；internal/geology 实现深度、状态和验证；internal/correlation 计算共同区间；internal/persistence 负责快照、锁和数据恢复；internal/config 解析环境变量和启动参数。完整接口见 README。
+cmd/stratad 提供启动入口。internal/api 处理 HTTP；internal/catalog 编排剖面与术语表工作流；internal/geology 实现深度、状态和验证；internal/glossary 维护岩性术语和批量解析；internal/correlation 计算共同区间；internal/persistence 负责快照、锁和数据恢复；internal/config 解析环境变量和启动参数。完整接口见 README。
 
 ## 验证计划
 默认 testing=deferred，不生成测试文件和测试数据。后续专项测试任务添加单元测试和浏览器无关的 API 回归测试。当前使用临时数据目录启动真实 HTTP 服务，执行编录、锁定修订、对比和查阅生产冒烟流程，并检查失败边界和重启恢复。所有检查有超时且不访问外网。

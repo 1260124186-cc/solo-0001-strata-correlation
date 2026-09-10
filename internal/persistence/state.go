@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/glossary"
 	"reflect"
 )
 
@@ -12,10 +13,11 @@ type State struct {
 	Schema      int                           `json:"schema"`
 	Histories   map[string][]geology.Revision `json:"histories"`
 	Comparisons map[string]correlation.Result `json:"comparisons"`
+	Glossary    []glossary.Term               `json:"glossary"`
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}, Glossary: []glossary.Term{}}
 }
 
 func (s State) Clone() State {
@@ -29,6 +31,9 @@ func (s State) Clone() State {
 	}
 	for id, result := range s.Comparisons {
 		out.Comparisons[id] = result.Clone()
+	}
+	if s.Glossary != nil {
+		out.Glossary = append([]glossary.Term{}, s.Glossary...)
 	}
 	return out
 }
@@ -55,6 +60,16 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 func (s State) Validate() error {
 	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
 		return fmt.Errorf("unsupported snapshot shape")
+	}
+	seenTerms := make(map[string]bool)
+	for _, term := range s.Glossary {
+		if err := term.Validate(); err != nil {
+			return fmt.Errorf("invalid glossary term %s: %w", term.ID, err)
+		}
+		if seenTerms[term.ID] {
+			return fmt.Errorf("duplicate glossary term id %s", term.ID)
+		}
+		seenTerms[term.ID] = true
 	}
 	for id, history := range s.Histories {
 		if len(history) == 0 {

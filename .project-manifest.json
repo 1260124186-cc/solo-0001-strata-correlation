@@ -29,6 +29,11 @@
       "responsibility": "interval alignment"
     },
     {
+      "id": "glossary",
+      "path": "internal/glossary",
+      "responsibility": "lithology terms and batch parsing"
+    },
+    {
       "id": "persistence",
       "path": "internal/persistence",
       "responsibility": "atomic snapshots and recovery"

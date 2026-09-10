@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/glossary"
 	"io"
 	"os"
 	"path/filepath"
@@ -47,6 +48,10 @@ func readSnapshot(path string) (State, error) {
 	}
 	if err = state.Validate(); err != nil {
 		return State{}, fmt.Errorf("snapshot validation: %w", err)
+	}
+	if state.Glossary == nil {
+		// Snapshots written before the glossary feature simply have an empty table.
+		state.Glossary = []glossary.Term{}
 	}
 	return state, nil
 }

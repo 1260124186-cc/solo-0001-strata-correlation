@@ -243,11 +243,69 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def glossary(s):
+    # Maintaining terms: unknown words are not guessed.
+    fine = s.call('POST', '/api/v1/glossary',
+                  dict(term='细砂岩', explanation='颗粒较细的砂岩', rock='sandstone'), 201)
+    fine2 = s.call('POST', '/api/v1/glossary',
+                   dict(term='细粒砂岩', explanation='编录者常用写法', rock='sandstone'), 201)
+    listing = s.call('GET', '/api/v1/glossary')['items']
+    assert [t['term'] for t in listing] == ['细砂岩', '细粒砂岩'], listing
+    s.call('POST', '/api/v1/glossary', dict(term='细砂岩', rock='sandstone'), 409)
+    for bad in [dict(term='细砂岩', rock='unknown'), dict(term='细砂岩', rock='gneiss'),
+                dict(term='', rock='mudstone'), dict(term='细砂岩', rock='shale', extra=1),
+                dict(term='', rock='shale')]:
+        s.call('POST', '/api/v1/glossary', bad, 422)
+    report = s.call('POST', '/api/v1/glossary/parse',
+                    dict(items=['细砂岩', ' 细粒砂岩 ', '粗砂岩', '粉砂岩']))
+    statuses = {item['index']: (item['status'], item.get('rock')) for item in report['items']}
+    assert (report['total'], report['resolved'], report['unknown']) == (4, 2, 2)
+    assert statuses[0] == ('resolved', 'sandstone')
+    assert statuses[1] == ('resolved', 'sandstone')
+    assert statuses[2] == ('unknown', None)
+    assert statuses[3] == ('unknown', None)
+    # Exact matching only: internal spacing is significant, nothing is guessed.
+    strict = s.call('POST', '/api/v1/glossary/parse', dict(items=['细 砂 岩', '细砂', '细粒  砂岩']))['items']
+    assert {item['status'] for item in strict} == {'unknown'}
+    # Conflicting cataloguer opinions are reported, never resolved by guessing.
+    rival = s.call('POST', '/api/v1/glossary',
+                   dict(term='细砂岩', explanation='另一位编录者判为页岩', rock='shale'), 201)
+    conflict = s.call('POST', '/api/v1/glossary/parse', dict(items=['细砂岩']))['items'][0]
+    assert conflict['status'] == 'conflict' and conflict['rocks'] == ['sandstone', 'shale']
+    assert fine['id'] in conflict['term_ids'] and rival['id'] in conflict['term_ids']
+    updated = s.call('PUT', f"/api/v1/glossary/{rival['id']}",
+                     dict(term='细砂岩', explanation='停用待讨论的页岩归类', rock='shale', enabled=False))
+    assert updated['enabled'] is False
+    resolved = s.call('POST', '/api/v1/glossary/parse', dict(items=['细砂岩']))['items'][0]
+    assert resolved['status'] == 'resolved' and resolved['rock'] == 'sandstone'
+    s.call('PUT', f"/api/v1/glossary/{rival['id']}",
+           dict(term='细砂岩', rock='shale'), 422)
+    s.call('PUT', f"/api/v1/glossary/{rival['id']}",
+           dict(term='细砂岩', rock='sandstone', enabled=True), 409)
+    s.call('PUT', '/api/v1/glossary/trm_' + '0' * 32,
+           dict(term='细砂岩', rock='shale', enabled=False), 404)
+    s.call('POST', '/api/v1/glossary/parse', dict(items=None), 422)
+    s.call('POST', '/api/v1/glossary/parse', dict(items=['细'] * 501), 422)
+    s.call('POST', '/api/v1/glossary/parse', dict(items=['细' * 41]), 422)
+    # Glossary edits never alter saved revisions or comparisons.
+    a, b = sealed(s, '术语西侧'), sealed(s, '术语东侧')
+    request = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
+    result = s.call('POST', '/api/v1/comparisons', request, 201)
+    revision_before = s.call('GET', f"/api/v1/profiles/{a['id']}/revisions/3")
+    s.call('PUT', f"/api/v1/glossary/{fine2['id']}",
+           dict(term='细粒砂岩', explanation='修订解释', rock='sandstone', enabled=False))
+    s.stop()
+    s.start()
+    assert len(s.call('GET', '/api/v1/glossary')['items']) == 3
+    assert s.call('GET', f"/api/v1/profiles/{a['id']}/revisions/3") == revision_before
+    assert s.call('GET', f"/api/v1/comparisons/{result['id']}") == result
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'glossary', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'glossary'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

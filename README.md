@@ -69,6 +69,31 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 `POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
+## 岩性术语表
+
+不同编录者可能写“细砂岩”“细粒砂岩”等不同术语，而分层只能保存固定岩性代码。岩性术语表把这些说法维护为术语行，并提供只读的批量解析入口，用于后续辅助录入。解析不会猜测归类，也不会改写任何已经保存的数据。
+
+```bash
+curl -sS http://127.0.0.1:8093/api/v1/glossary \
+  -H 'Content-Type: application/json' \
+  -d '{"term":"细砂岩","explanation":"颗粒较细的砂岩","rock":"sandstone"}'
+curl -sS http://127.0.0.1:8093/api/v1/glossary/parse \
+  -H 'Content-Type: application/json' \
+  -d '{"items":["细砂岩","细粒砂岩","粗砂岩"]}'
+```
+
+术语包含 `id, term, explanation, rock, enabled, created_at, updated_at`。术语最长 40 字、解释最长 200 字，术语表最多 2000 行；`rock` 必须是五种具体岩性之一（不允许 `unknown`，未知表示没有归类，而不是一种可维护的术语目标）。术语去除首尾空白并折叠连续空白后精确匹配，忽略大小写，不做模糊或子串匹配；因此“细砂”“细 砂 岩”不会命中“细砂岩”。
+
+同一术语与同一标准岩性的组合只能存在一行；不同编录者对同一术语给出不同岩性时可以共存。批量解析单次最多 500 条，每条返回 `index, input, status, rock, rocks, term_ids`：
+
+- `resolved`：启用行一致指向同一岩性，返回 `rock`；
+- `unknown`：没有启用术语命中，调用方必须人工归类，服务不猜测；
+- `conflict`：启用术语指向多个岩性，`rocks` 列出候选并附各行 `term_ids`，需要先统一术语表。
+
+`PUT /api/v1/glossary/{id}` 全量更新术语、解释、对应岩性和 `enabled`（更新时必须明确 `enabled`）。停用的行保留在表中用于追溯，但不再参与解析；重新启用即对后续解析生效。
+
+解析是纯辅助操作：它只读取术语表并返回建议，不创建或修改分层。术语变更（包括停用）只影响**之后**的辅助录入和解析结果；历史分层、锁定版本和已保存的对比结果完全不受影响——分层始终保存提交时的标准岩性代码，对比结果绑定指定的历史版本且不可变。
+
 ## HTTP 接口
 
 接口统一前缀 `/api/v1`，请求体类型 `application/json`，最大 4 MiB；拒绝未知 JSON 字段及多个连续 JSON 对象。应用错误采用 `{"error":{"code":"invalid","field":"depth_mm","detail":"..."}}`。HTTP 422 表示字段错误，409 表示状态或版本冲突，404 表示资源缺失，415 表示请求类型错误，413 表示体积超限，500 表示内部故障。不存在的路由和不支持的方法使用 Go HTTP 的 404/405 响应。
@@ -77,6 +102,10 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | --- | --- |
 | `GET /healthz` | 就绪状态，持久化故障时为 503 |
 | `GET /rocks` | 岩性代码与中文名称 |
+| `GET /glossary` | 岩性术语表，按术语排序 |
+| `POST /glossary` | `term, explanation, rock, enabled?`，新增术语 |
+| `PUT /glossary/{id}` | 全量更新术语、解释、对应岩性和启用状态 |
+| `POST /glossary/parse` | `items` 批量解析，报告 resolved/unknown/conflict |
 | `POST /profiles` | `name, site, depth_mm, note` |
 | `GET /profiles` | `q, site, state, rock, offset, limit` 筛选与分页 |
 | `GET /profiles/{id}` | 当前完整剖面 |
@@ -103,7 +132,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 ## 持久化与恢复
 
-数据目录保存 `strata.json` 和 `strata.lock`。每次成功写入将全部状态写到同目录临时文件，执行文件 fsync 后原子替换快照，并对目录执行 fsync。剖面、版本事件和对比结果始终处于同一状态边界；失败的校验不会修改内存或磁盘。
+数据目录保存 `strata.json` 和 `strata.lock`。每次成功写入将全部状态写到同目录临时文件，执行文件 fsync 后原子替换快照，并对目录执行 fsync。剖面、版本事件、对比结果和术语表始终处于同一状态边界；失败的校验不会修改内存或磁盘。术语功能加入前写出的快照没有 `glossary` 字段，启动时按空术语表恢复，之后再次写入即带上该字段。
 
 快照包含 SHA-256 校验值。启动时检查校验值、版本连续性、状态转换及对比可重复性，遇到损坏拒绝启动。进程在替换前中断保留旧快照，替换后中断使用新快照。同目录遗留的 `.strata-*` 临时文件不会参与恢复，可在服务停止时清理。若替换后同步目录失败，服务保留新内存状态并停止后续写入，健康状态变为 503；检查磁盘并重启后再读取版本确认结果，不要盲目重放修改。
 
@@ -118,17 +147,18 @@ python3 scripts/smoke.py all
 STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 ```
 
-**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
+**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse / glossary` 五个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页，以及术语表的新增、停用、重复与冲突检测、未知词报告、批量上限和历史数据不受术语变更影响。
 
 ## 目录
 
 ```text
 cmd/stratad/          启动、信号和 HTTP 服务生命周期
 internal/api/        JSON、路由、查询参数和请求记录
-internal/catalog/    编录、修订、查阅和对比工作流
+internal/catalog/    编录、修订、查阅、对比和术语表工作流
 internal/geology/    分层规则、覆盖、深度查询和版本差异
+internal/glossary/   岩性术语维护与批量解析
 internal/correlation/区间对比、标志层偏移与 CSV
 internal/persistence/快照校验、原子替换、独占锁
 internal/config/     环境变量与启动参数
