@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   verify:
-    name: ${{ matrix.os }}: build / vet / smoke
+    name: "${{ matrix.os }}: build / vet / smoke"
     strategy:
       fail-fast: false
       matrix:
@@ -41,7 +41,7 @@ jobs:
         run: scripts/verify.sh smoke
 
   race:
-    name: ubuntu: race (optional, high cost)
+    name: "ubuntu: race (optional, high cost)"
     needs: verify
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.race }}
     runs-on: ubuntu-latest
