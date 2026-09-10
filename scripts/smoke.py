@@ -325,16 +325,73 @@ def imports(s):
     assert badjob['status'] == 'preview' and badjob['groups']
     lines = {e['line']: e for e in badjob['errors']}
     assert set(lines) == {2, 4, 5, 6, 7, 8, 9}, lines
+
+    # Every RowError must bind the COMPLETE original nine-column record of
+    # its source line, including metadata and layers cross-row failures.
+    raw_columns = ['name', 'site', 'depth_mm', 'note', 'top_mm', 'bottom_mm',
+                   'rock', 'description', 'marker']
+    bad_lines = bad.splitlines()
+    for err in badjob['errors']:
+        cells = next(csv.reader([bad_lines[err['line'] - 1]]))
+        cells = (cells + [''] * len(raw_columns))[:len(raw_columns)]
+        expected = dict(zip(raw_columns, cells))
+        got = {col: err['raw'].get(col, '') for col in raw_columns}
+        assert got == expected, (err['line'], err['field'], got, expected)
+        assert not err['raw'].get('extra'), err  # well-formed rows carry no extra cells
+    # the ragged row keeps its 8 cells in column order and has no overflow cells
+    assert 'extra' not in lines[9]['raw']
+
     # overlap is reported on the earlier layer's line and keeps that raw row
     assert lines[2]['field'] == 'layers' and lines[2]['detail'] == '分层不能重叠'
-    assert lines[2]['raw']['rock'] == 'sandstone'
+    assert lines[2]['raw']['name'] == '北坡' and lines[2]['raw']['site'] == '北坡'
+    assert lines[2]['raw']['depth_mm'] == '10000' and lines[2]['raw']['bottom_mm'] == '5000'
     assert lines[4]['field'] == 'depth_mm' and lines[4]['raw']['depth_mm'] == '9000'
+    assert lines[4]['raw']['name'] == '北坡' and lines[4]['raw']['rock'] == 'sandstone'
     assert lines[5]['field'] == 'rock' and lines[5]['raw']['rock'] == 'granite'
+    assert lines[5]['raw']['name'] == '南坡' and lines[5]['raw']['bottom_mm'] == '9000'
     assert lines[6]['field'] == 'depth_mm'
+    assert lines[6]['raw']['name'] == '东坡' and lines[6]['raw']['top_mm'] == '0'
     assert lines[7]['field'] == 'layers' and lines[7]['raw']['bottom_mm'] == '500'
+    assert lines[7]['raw']['name'] == '西坡' and lines[7]['raw']['depth_mm'] == '10000'
     assert lines[8]['field'] == 'name' and lines[8]['raw']['name'] == ' '
     assert lines[9]['field'] == 'row' and lines[9]['raw']['rock'] == 'sandstone'
     assert lines[9]['raw']['marker'] == '' and lines[9]['raw']['description'] == '缺列'
+
+    # metadata-only failure (depth out of range) still carries all layer columns
+    meta = '\n'.join([
+        header,
+        '深剖面,深地点,0,说明留空,100,200,sandstone,首层,标志A',
+        '深剖面,深地点,0,说明留空,200,400,mudstone,二层,标志B',
+    ])
+    metajob, _, _ = s.call_csv('/api/v1/profile-imports', meta, expected=201)
+    assert len(metajob['errors']) == 1 and metajob['errors'][0]['line'] == 2
+    mraw = metajob['errors'][0]['raw']
+    assert mraw == {'name': '深剖面', 'site': '深地点', 'depth_mm': '0', 'note': '说明留空',
+                    'top_mm': '100', 'bottom_mm': '200', 'rock': 'sandstone',
+                    'description': '首层', 'marker': '标志A'}, mraw
+
+    # duplicate marker error (cross-row layers rule) carries the full row
+    markers = '\n'.join([
+        header,
+        '标剖面,标地点,10000,,0,4000,sandstone,首层,凝灰',
+        '标剖面,标地点,10000,,4000,10000,mudstone,二层,凝灰',
+    ])
+    markerjob, _, _ = s.call_csv('/api/v1/profile-imports', markers, expected=201)
+    merr = next(e for e in markerjob['errors'] if '标志层' in e['detail'])
+    assert merr['line'] == 3 and merr['raw']['name'] == '标剖面'
+    assert merr['raw']['depth_mm'] == '10000' and merr['raw']['marker'] == '凝灰'
+    assert merr['raw']['top_mm'] == '4000' and merr['raw']['bottom_mm'] == '10000'
+
+    # over-500-layers group-level error binds the first row's full record
+    cap_rows = [header]
+    for i in range(501):
+        cap_rows.append(f'厚剖面,厚地点,1000000,,{i*1000},{(i+1)*1000},sandstone,第{i}层,')
+    capjob, _, _ = s.call_csv('/api/v1/profile-imports', '\n'.join(cap_rows), expected=201)
+    caperr = next(e for e in capjob['errors'] if '500' in e['detail'])
+    assert caperr['line'] == 2 and caperr['field'] == 'layers'
+    assert caperr['raw'] == {'name': '厚剖面', 'site': '厚地点', 'depth_mm': '1000000',
+                             'note': '', 'top_mm': '0', 'bottom_mm': '1000',
+                             'rock': 'sandstone', 'description': '第0层', 'marker': ''}, caperr['raw']
 
     status, payload = s.call_status('POST', f"/api/v1/profile-imports/{badjob['id']}/confirm")
     assert status == 422 and payload['import']['status'] == 'failed'

@@ -34,6 +34,7 @@ type builder struct {
 	depthRaw string
 	depth    int64
 	note     string
+	firstRaw RawFields
 	layers   []LayerDraft
 }
 
@@ -69,6 +70,7 @@ func Parse(source []byte, now time.Time) (Import, error) {
 	// DeepEqual-stable across Clone and JSON snapshot round-trips.
 	rowErrors := []RowError{}
 	builders := make(map[string]*builder)
+	rawByLine := map[int]RawFields{} // complete original record of every well-formed data row
 	order := []string{}
 	dataRows := 0
 
@@ -108,13 +110,14 @@ func Parse(source []byte, now time.Time) (Import, error) {
 			rowErrors = append(rowErrors, RowError{Line: line, Field: "row", Detail: fmt.Sprintf("列数为 %d，表头要求 %d 列", len(rec), len(header)), Raw: raw})
 			continue
 		}
+		rawByLine[line] = raw
 
 		site := strings.TrimSpace(raw.Site)
 		depthRaw := strings.TrimSpace(raw.DepthMM)
 		note := strings.TrimSpace(raw.Note)
 		b, exists := builders[name]
 		if !exists {
-			b = &builder{line: line, name: name, site: site, depthRaw: depthRaw, note: note}
+			b = &builder{line: line, name: name, site: site, depthRaw: depthRaw, note: note, firstRaw: raw}
 			if n, perr := strconv.ParseInt(depthRaw, 10, 64); perr == nil {
 				b.depth = n
 			}
@@ -173,7 +176,7 @@ func Parse(source []byte, now time.Time) (Import, error) {
 				Line:   b.line,
 				Field:  metadataField(metadataErr),
 				Detail: problemDetail(metadataErr),
-				Raw:    rawOf(b),
+				Raw:    b.firstRaw,
 			})
 			continue
 		}
@@ -190,7 +193,7 @@ func Parse(source []byte, now time.Time) (Import, error) {
 		}
 		normalizedLayers, layerErr := geology.NormalizeLayers(layers, normalized.DepthMM)
 		if layerErr != nil {
-			rowErrors = append(rowErrors, mapLayerError(layerErr, b.layers)...)
+			rowErrors = append(rowErrors, mapLayerError(layerErr, b.layers, rawByLine, b.firstRaw)...)
 		} else {
 			for i := range b.layers {
 				b.layers[i].Layer = normalizedLayers[i]
@@ -270,10 +273,6 @@ func isEmptyRecord(rec []string) bool {
 	return true
 }
 
-func rawOf(b *builder) RawFields {
-	return RawFields{Name: b.name, Site: b.site, DepthMM: b.depthRaw, Note: b.note}
-}
-
 func problemDetail(err error) string {
 	if p, ok := err.(*geology.Problem); ok {
 		return p.Detail
@@ -289,16 +288,14 @@ func metadataField(err error) string {
 }
 
 // mapLayerError translates a layers[i] validation error back to the original
-// CSV line that produced the layer.
-func mapLayerError(err error, drafts []LayerDraft) []RowError {
+// CSV line that produced the layer, binding the complete original record.
+// rawByLine resolves a layer index (layers were depth-sorted) to its source
+// line; firstRaw is the group's first row and backs group-level errors such
+// as the 500-layer cap that do not point at a single layer.
+func mapLayerError(err error, drafts []LayerDraft, rawByLine map[int]RawFields, firstRaw RawFields) []RowError {
 	p, ok := err.(*geology.Problem)
-	if !ok || len(drafts) == 0 {
-		line := 0
-		var raw RawFields
-		if len(drafts) > 0 {
-			line, raw = drafts[0].Line, rawOfLayer(drafts[0])
-		}
-		return []RowError{{Line: line, Field: "layers", Detail: err.Error(), Raw: raw}}
+	if !ok {
+		return []RowError{{Line: firstLine(drafts), Field: "layers", Detail: err.Error(), Raw: firstRaw}}
 	}
 	idx, sub := -1, ""
 	if matches := layerFieldPattern.FindStringSubmatch(p.Field); matches != nil {
@@ -306,22 +303,26 @@ func mapLayerError(err error, drafts []LayerDraft) []RowError {
 		sub = matches[2]
 	}
 	if idx < 0 || idx >= len(drafts) {
-		return []RowError{{Line: drafts[0].Line, Field: "layers", Detail: p.Detail, Raw: rawOfLayer(drafts[0])}}
+		return []RowError{{Line: firstLine(drafts), Field: "layers", Detail: p.Detail, Raw: firstRaw}}
 	}
 	d := drafts[idx]
+	raw, found := rawByLine[d.Line]
+	if !found {
+		raw = firstRaw
+	}
 	field := "layers"
 	if sub != "" {
 		field = sub
 	}
-	return []RowError{{Line: d.Line, Field: field, Detail: p.Detail, Raw: rawOfLayer(d)}}
+	return []RowError{{Line: d.Line, Field: field, Detail: p.Detail, Raw: raw}}
 }
 
-func rawOfLayer(d LayerDraft) RawFields {
-	return RawFields{
-		TopMM:       strconv.FormatInt(d.TopMM, 10),
-		BottomMM:    strconv.FormatInt(d.BottomMM, 10),
-		Rock:        string(d.Rock),
-		Description: d.Description,
-		Marker:      d.Marker,
+func firstLine(drafts []LayerDraft) int {
+	first := 0
+	for _, d := range drafts {
+		if first == 0 || d.Line < first {
+			first = d.Line
+		}
 	}
+	return first
 }
