@@ -123,6 +123,26 @@
         "geology",
         "persistence"
       ]
+    },
+    {
+      "id": "groups",
+      "name": "成组对比",
+      "entry": "POST /api/v1/comparison-groups",
+      "steps": [
+        "validate reference and independent targets",
+        "schedule items under the worker cap",
+        "isolate per-item failures and reuse identical inputs",
+        "persist item states and recover after restart"
+      ],
+      "success": "group completes with per-item results or failure reasons",
+      "failure": "invalid reference or nonoverlapping target marks only that item failed",
+      "verification": "bounded HTTP workflow smoke check with crash recovery",
+      "module_ids": [
+        "api",
+        "catalog",
+        "correlation",
+        "persistence"
+      ]
     }
   ]
 }

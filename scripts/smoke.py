@@ -11,6 +11,7 @@ import selectors
 import signal
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -243,11 +244,117 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def groups(s):
+    a, b, c = sealed(s, '组参考剖面'), sealed(s, '组目标甲', 6000), sealed(s, '组目标乙')
+    d = create(s, '组草稿')
+    ref, good, other, draft = dict(id=a['id'], version=3), dict(id=b['id'], version=3), dict(id=c['id'], version=3), dict(id=d['id'], version=1)
+    # 预先创建 good@0，组内该项应复用。
+    pre = s.call('POST', '/api/v1/comparisons', dict(left=ref, right=good, offset_mm=0), 201)
+    body = dict(reference=ref, targets=[
+        dict(target=good, offset_mm=0),                       # 复用已有结果
+        dict(target=other, offset_mm=0),                      # 新计算
+        dict(target=good, offset_mm=-2000),                    # 新计算
+        dict(target=good, offset_mm=10000),                   # 无共同区间 -> 失败
+        dict(target=dict(id='prf_' + 'f' * 32, version=3), offset_mm=0),  # 引用无效 -> 失败
+        dict(target=draft, offset_mm=0),                                    # 未锁定版本 -> 失败
+    ])
+    group = s.call('POST', '/api/v1/comparison-groups', body, 202)
+    assert group['status'] == 'queued' and len(group['items']) == 6
+    gid = group['id']
+    for _ in range(100):
+        group = s.call('GET', f'/api/v1/comparison-groups/{gid}')
+        if group['status'] == 'completed':
+            break
+    assert group['status'] == 'completed'
+    statuses = [(i['index'], i['status'], bool(i.get('error')), i['reused']) for i in group['items']]
+    assert statuses == [
+        (0, 'succeeded', False, True),
+        (1, 'succeeded', False, False),
+        (2, 'succeeded', False, False),
+        (3, 'failed', True, False),
+        (4, 'failed', True, False),
+        (5, 'failed', True, False),
+    ], statuses
+    assert [i['error']['code'] for i in group['items'][3:]] == ['conflict', 'missing', 'conflict']
+    # 成功项都能打开对应对比结果，且单项失败不影响同组其他项。
+    for item in group['items'][:3]:
+        cmp_ = s.call('GET', '/api/v1/comparisons/' + item['comparison_id'])
+        assert cmp_['request']['left'] == ref
+    # 第二组重复相同输入，全部标记复用。
+    again = s.call('POST', '/api/v1/comparison-groups', dict(reference=ref, targets=[
+        dict(target=other, offset_mm=0), dict(target=good, offset_mm=-2000)]), 202)
+    for _ in range(100):
+        again = s.call('GET', f'/api/v1/comparison-groups/{again["id"]}')
+        if again['status'] == 'completed':
+            break
+    assert all(i['status'] == 'succeeded' and i['reused'] for i in again['items'])
+    # 结构性错误整体拒绝（422），不落组。
+    s.call('POST', '/api/v1/comparison-groups', dict(reference=ref, targets=[]), 422)
+    s.call('POST', '/api/v1/comparison-groups', dict(reference=ref, targets=[dict(target=ref, offset_mm=0)]), 422)
+    s.call('POST', '/api/v1/comparison-groups', dict(reference=ref, targets=[
+        dict(target=other, offset_mm=0), dict(target=other, offset_mm=0)]), 422)
+    s.call('POST', '/api/v1/comparison-groups', dict(reference=ref, targets=[
+        dict(target=other, offset_mm=1000001)]), 422)
+    # 已完成组恢复冲突；列表分页与未知参数。
+    s.call('POST', f'/api/v1/comparison-groups/{gid}/resume', expected=409)
+    page = s.call('GET', '/api/v1/comparison-groups?limit=1')
+    assert page['total'] == 2 and len(page['items']) == 1
+    s.call('GET', '/api/v1/comparison-groups?extra=1', expected=422)
+    s.call('GET', '/api/v1/comparison-groups/grp_' + '0' * 32, expected=404)
+    s.call('POST', '/api/v1/comparison-groups/grp_' + '0' * 32 + '/resume', expected=404)
+
+    # 崩溃恢复：提交大量排队项，等出现运行中项后冻结进程并硬杀，
+    # 重启后运行中项重置为排队并由服务自动恢复跑完。
+    pending = s.call('POST', '/api/v1/comparison-groups', dict(reference=ref, targets=[
+        dict(target=other, offset_mm=k) for k in range(100, 150)]), 202)
+    pid = s.process.pid
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        running = s.call('GET', f'/api/v1/comparison-groups/{pending["id"]}')
+        if any(i['status'] == 'running' for i in running['items']):
+            break
+    os.kill(pid, signal.SIGSTOP)
+    time.sleep(0.2)
+    os.kill(pid, signal.SIGKILL)
+    s.process.wait(timeout=5)
+    s.process.stdout.close()
+    s.process = None
+    # 硬杀前确有运行中项已持久化，模拟真实崩溃残留。
+    crashed = json.loads((s.directory / 'data' / 'strata.json').read_text())
+    crashed_data = json.loads(crashed['data']) if isinstance(crashed['data'], str) else crashed['data']
+    assert any(i['status'] == 'running' for i in crashed_data['groups'][pending['id']]['items'])
+    s.start()
+    # 服务启动即把遗留的运行中项重置为排队并自动恢复，等待全部终态。
+    recovered = s.call('GET', f'/api/v1/comparison-groups/{pending["id"]}')
+    assert recovered['status'] in ('queued', 'running')
+    for _ in range(200):
+        recovered = s.call('GET', f'/api/v1/comparison-groups/{pending["id"]}')
+        if recovered['status'] == 'completed':
+            break
+    assert recovered['status'] == 'completed'
+    assert all(i['status'] in ('succeeded', 'failed') for i in recovered['items'])
+    # 显式恢复接口对未完成组可用且幂等；已完成组冲突。
+    s.call('POST', f'/api/v1/comparison-groups/{pending["id"]}/resume', expected=409)
+    unfinished = s.call('POST', '/api/v1/comparison-groups', dict(reference=ref, targets=[
+        dict(target=good, offset_mm=7000)]), 202)
+    for _ in range(100):
+        unfinished = s.call('GET', f'/api/v1/comparison-groups/{unfinished["id"]}')
+        if unfinished['status'] == 'completed':
+            break
+    assert unfinished['status'] == 'completed'
+    s.call('POST', f'/api/v1/comparison-groups/{unfinished["id"]}/resume', expected=409)
+    # 再次重启，已完成组保持稳定，没有重复入队。
+    s.stop()
+    s.start()
+    stable = s.call('GET', f'/api/v1/comparison-groups/{pending["id"]}')
+    assert stable['status'] == 'completed'
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'groups', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'groups'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

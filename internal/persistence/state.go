@@ -12,14 +12,21 @@ type State struct {
 	Schema      int                           `json:"schema"`
 	Histories   map[string][]geology.Revision `json:"histories"`
 	Comparisons map[string]correlation.Result `json:"comparisons"`
+	Groups      map[string]correlation.Group  `json:"groups,omitempty"`
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{
+		Schema:      2,
+		Histories:   map[string][]geology.Revision{},
+		Comparisons: map[string]correlation.Result{},
+		Groups:      map[string]correlation.Group{},
+	}
 }
 
 func (s State) Clone() State {
 	out := emptyState()
+	out.Schema = s.Schema
 	for id, revisions := range s.Histories {
 		copies := make([]geology.Revision, len(revisions))
 		for i, r := range revisions {
@@ -29,6 +36,9 @@ func (s State) Clone() State {
 	}
 	for id, result := range s.Comparisons {
 		out.Comparisons[id] = result.Clone()
+	}
+	for id, group := range s.Groups {
+		out.Groups[id] = group.Clone()
 	}
 	return out
 }
@@ -53,7 +63,7 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 }
 
 func (s State) Validate() error {
-	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
+	if (s.Schema != 1 && s.Schema != 2) || s.Histories == nil || s.Comparisons == nil {
 		return fmt.Errorf("unsupported snapshot shape")
 	}
 	for id, history := range s.Histories {
@@ -105,6 +115,55 @@ func (s State) Validate() error {
 		actual, _ := json.Marshal(result)
 		if string(expected) != string(actual) {
 			return fmt.Errorf("comparison data mismatch")
+		}
+	}
+	for id, group := range s.Groups {
+		if id != group.ID || !geology.ValidID(id, "grp_") || len(group.Items) == 0 {
+			return fmt.Errorf("invalid comparison group identity")
+		}
+		if !geology.ValidID(group.Reference.ID, "prf_") || group.Reference.Version < 1 {
+			return fmt.Errorf("invalid group reference %s", id)
+		}
+		if group.CreatedAt.IsZero() || group.UpdatedAt.Before(group.CreatedAt) {
+			return fmt.Errorf("invalid group chronology %s", id)
+		}
+		for i, item := range group.Items {
+			if item.Index != i {
+				return fmt.Errorf("invalid group item order %s", id)
+			}
+			switch item.Status {
+			case correlation.ItemQueued, correlation.ItemRunning, correlation.ItemSucceeded, correlation.ItemFailed:
+			default:
+				return fmt.Errorf("invalid group item status %s", id)
+			}
+			switch item.Status {
+			case correlation.ItemSucceeded:
+				expectedKey := correlation.Request{Left: group.Reference, Right: item.Target, OffsetMM: item.OffsetMM}.Key()
+				if item.Error != nil || item.ComparisonID != expectedKey {
+					return fmt.Errorf("invalid succeeded group item %s", id)
+				}
+				if _, ok := s.Comparisons[item.ComparisonID]; !ok {
+					return fmt.Errorf("group item missing comparison %s", id)
+				}
+			case correlation.ItemFailed:
+				if item.ComparisonID != "" || item.Error == nil || item.Error.Code == "" || item.Error.Detail == "" {
+					return fmt.Errorf("invalid failed group item %s", id)
+				}
+			default:
+				if item.Error != nil || item.ComparisonID != "" || item.Reused {
+					return fmt.Errorf("unfinished group item has outcome %s", id)
+				}
+			}
+		}
+		// 磁盘上可能遗留运行中的组（异常退出），由启动恢复重置；
+		// 其余情况下组状态必须与各项推导结果一致。
+		switch group.Status {
+		case correlation.GroupQueued, correlation.GroupRunning, correlation.GroupCompleted:
+		default:
+			return fmt.Errorf("invalid group status %s", id)
+		}
+		if group.Status != group.DerivedStatus() {
+			return fmt.Errorf("group status mismatch %s", id)
 		}
 	}
 	return nil

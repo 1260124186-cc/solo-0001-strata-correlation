@@ -32,7 +32,12 @@ func run() error {
 	}
 	defer repo.Close()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	handler := api.New(catalog.New(repo), logger)
+	service := catalog.New(repo, logger, c.Workers)
+	if err = service.Start(); err != nil {
+		return err
+	}
+	defer service.Close()
+	handler := api.New(service, logger)
 	listener, err := net.Listen("tcp", c.Addr)
 	if err != nil {
 		return err

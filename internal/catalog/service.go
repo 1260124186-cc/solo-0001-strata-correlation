@@ -6,13 +6,19 @@ import (
 	"encoding/hex"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/persistence"
+	"log/slog"
 	"strings"
+	"sync"
 	"time"
 )
 
-type Service struct{ repo *persistence.Repository }
-
-func New(repo *persistence.Repository) *Service { return &Service{repo: repo} }
+type Service struct {
+	repo     *persistence.Repository
+	logger   *slog.Logger
+	runner   *GroupRunner
+	flightMu sync.Mutex
+	flights  map[string]*flight
+}
 
 func newID() (string, error) {
 	bytes := make([]byte, 16)

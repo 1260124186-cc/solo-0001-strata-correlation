@@ -18,6 +18,7 @@ go run ./cmd/stratad -addr 127.0.0.1:8093 -data ./data
 | `-addr` | `STRATA_ADDR` | `127.0.0.1:8093` | HTTP 监听地址 |
 | `-data` | `STRATA_DATA` | `./data` | 持久化目录 |
 | `-shutdown` | `STRATA_SHUTDOWN` | `10s` | 优雅退出期限，允许 1s–1m |
+| `-workers` | `STRATA_WORKERS` | `4` | 成组对比并发计算上限，允许 1–16 |
 
 显式参数优先于环境变量。数据目录只能由一个服务进程打开；系统文件锁在进程退出后自动释放。默认只监听本机，适合受信任的单机部署。当前基线未包含身份验证、TLS 和跨节点复制。
 
@@ -67,6 +68,28 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 相同输入和算法版本生成同一编号，首次返回 HTTP 201，重复请求返回 HTTP 200 和原结果。交换左右或修改偏移属于不同输入。`GET /api/v1/comparisons/{id}/csv` 导出固定字段的区间 CSV，字段只包含数值、岩性代码和关系代码。
 
+## 成组对比
+
+区域解释以一份参考剖面（锁定版本）为中心，一次提交多个目标版本，每个目标携带独立偏移，并拥有独立处理状态：
+
+```json
+{
+  "reference": {"id": "<reference-profile-id>", "version": 3},
+  "targets": [
+    {"target": {"id": "<target-a-id>", "version": 3}, "offset_mm": -2000},
+    {"target": {"id": "<target-b-id>", "version": 5}, "offset_mm": 0}
+  ]
+}
+```
+
+提交至 `POST /api/v1/comparison-groups`，返回 HTTP 202 和排队中的组。服务按固定 worker 上限（默认 4，`-workers` / `STRATA_WORKERS`，1–16）并发计算；区间合并不持全局写入锁，因此组间也共享该并发预算。
+
+组与每项各有状态：项状态为 `queued / running / succeeded / failed`，组状态由各项推导（全部排队为 `queued`，存在运行中或部分终态为 `running`，全部终态为 `completed`）。**某项引用无效、目标版本未锁定或偏移后没有共同区间时，只把该项标记为 `failed` 并记录 `error.code` 与中文原因，其余合法项照常完成。** 组最多 100 个目标，目标版本与偏移不能与同组其他项重复；参考编号、版本号、偏移范围和“不得与参考相同”等结构性错误整体返回 422，不会创建组。
+
+成功项的 `comparison_id` 指向普通对比结果：**相同输入（含算法版本）在整个服务内复用**——已保存的结果直接引用，正在进行的同一计算只执行一次，首个请求承担计算，其余请求等待并复用，`reused` 表示该项是否复用了已有结果。因此单次 `POST /comparisons` 与组成员之间也互相复用，对比结果总数仍受 10000 条上限约束（达到上限后新输入的项失败，已存在的键仍可复用）。对比组最多保存 1000 组。
+
+组在每个状态变化点原子持久化：创建、项开始、项结束都落快照。服务异常退出后，磁盘上遗留的 `running` 项会在下次启动时重置为 `queued`，**未结束的组启动即自动恢复调度**；也可以通过 `POST /api/v1/comparison-groups/{id}/resume` 显式恢复（已完成的组返回 409）。优雅退出时停止接收新任务并等待正在计算的项落定。重启后任何时刻都可通过 `GET /api/v1/comparison-groups/{id}` 查看进度。
+
 `POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
 ## HTTP 接口
@@ -94,10 +117,14 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /comparisons` | 可选 `profile_id, offset, limit` |
 | `GET /comparisons/{id}` | 已保存的完整对比结果 |
 | `GET /comparisons/{id}/csv` | 区间 CSV |
+| `POST /comparison-groups` | `reference, targets[]`（各含 `target, offset_mm`），成组对比，返回 202 |
+| `GET /comparison-groups` | `offset, limit` 分页 |
+| `GET /comparison-groups/{id}` | 组与各项的独立处理状态和失败原因 |
+| `POST /comparison-groups/{id}/resume` | 恢复未结束的组（已完成返回 409） |
 
 上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
 
-单个剖面最多 500 层、500 个历史版本，总深度最大 1000000 毫米。最多 2000 个剖面、10000 个对比结果，总快照上限 64 MiB。岩性支持 `sandstone / mudstone / limestone / shale / conglomerate / unknown`。名称最多 120 字、地点 200 字、说明 2000 字，单层描述 1000 字，标志层名称 80 字，修订理由 1–500 字。标志层名称在同一剖面内忽略大小写后必须唯一。
+单个剖面最多 500 层、500 个历史版本，总深度最大 1000000 毫米。最多 2000 个剖面、1000 个对比组（每组最多 100 个目标）、10000 个对比结果，总快照上限 64 MiB。岩性支持 `sandstone / mudstone / limestone / shale / conglomerate / unknown`。名称最多 120 字、地点 200 字、说明 2000 字，单层描述 1000 字，标志层名称 80 字，修订理由 1–500 字。标志层名称在同一剖面内忽略大小写后必须唯一。
 
 差异接口按完整深度区间匹配分层；边界变化展示为原区间移除和新区间增加，相同区间中的岩性或描述修改展示前后值。深度查询使用左闭右开区间，边界点属于其下方分层，剖面底端不属于任何层。
 
@@ -118,9 +145,9 @@ python3 scripts/smoke.py all
 STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 ```
 
-**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
+**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse / groups` 五个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页，以及成组对比的独立偏移与失败隔离、相同输入复用、并发上限、崩溃恢复和显式恢复。
 
 ## 目录
 
@@ -129,7 +156,7 @@ cmd/stratad/          启动、信号和 HTTP 服务生命周期
 internal/api/        JSON、路由、查询参数和请求记录
 internal/catalog/    编录、修订、查阅和对比工作流
 internal/geology/    分层规则、覆盖、深度查询和版本差异
-internal/correlation/区间对比、标志层偏移与 CSV
+internal/correlation/区间对比、成组对比模型、标志层偏移与 CSV
 internal/persistence/快照校验、原子替换、独占锁
 internal/config/     环境变量与启动参数
 scripts/smoke.py      临时环境 HTTP 运行验证

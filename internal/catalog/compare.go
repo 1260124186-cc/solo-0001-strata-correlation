@@ -6,7 +6,6 @@ import (
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/persistence"
 	"sort"
-	"time"
 )
 
 type ComparisonPage struct {
@@ -20,33 +19,7 @@ func (s *Service) Compare(ctx context.Context, input correlation.Request) (corre
 	if err := input.Validate(); err != nil {
 		return correlation.Result{}, false, err
 	}
-	var result correlation.Result
-	reused := false
-	err := s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
-		if cached, ok := state.Comparisons[input.Key()]; ok {
-			result = cached.Clone()
-			reused = true
-			return false, nil
-		}
-		if len(state.Comparisons) >= 10000 {
-			return false, geology.Conflict("对比结果数量达到 10000 条上限")
-		}
-		left, err := state.Revision(input.Left.ID, input.Left.Version)
-		if err != nil {
-			return false, err
-		}
-		right, err := state.Revision(input.Right.ID, input.Right.Version)
-		if err != nil {
-			return false, err
-		}
-		result, err = correlation.Align(left.Profile, right.Profile, input, time.Now().UTC())
-		if err != nil {
-			return false, err
-		}
-		state.Comparisons[result.ID] = result.Clone()
-		return true, nil
-	})
-	return result, reused, err
+	return s.compute(ctx, input)
 }
 
 func (s *Service) Comparison(ctx context.Context, id string) (correlation.Result, error) {
