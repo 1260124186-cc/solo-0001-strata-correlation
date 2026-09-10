@@ -69,6 +69,33 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 `POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
+## CSV 批量导入剖面
+
+现场资料可一次提交整份 CSV。`POST /api/v1/profile-imports` 只接受 `text/csv`（同样受 4 MiB 限制），UTF-8 编码，首行为表头且必须恰好包含下列九列（顺序任意，允许 BOM 和空行）：
+
+```text
+name,site,depth_mm,note,top_mm,bottom_mm,rock,description,marker
+```
+
+同名（去除首尾空白后）的数据行归为同一剖面的分层预览；每个剖面的 `site / depth_mm / note` 在各行之间必须一致。深度仍为整数毫米，岩性仍使用六个代码，标志层在同一剖面内唯一——全部沿用既有的深度、岩性和标志层规则。
+
+上传**不会立即创建剖面**，而是生成一个持久化的导入任务（编号 `imp_` 加文件内容 SHA-256），响应按剖面归组给出预览；每处错误都带原始 CSV **行号** `line`、字段名和该行**原始字段** `raw`。整份 CSV 的原始字节也随快照保存，因此服务重启后仍可查询预览与状态，启动时还会重新解析校验预览与原始 CSV 一致。表头缺失、列未知、重复列或只有表头没有数据行属于文件级错误，返回 422，不会生成导入任务。
+
+```bash
+curl -sS http://127.0.0.1:8093/api/v1/profile-imports \
+  -H 'Content-Type: text/csv' --data-binary @sections.csv
+curl -sS -X POST "http://127.0.0.1:8093/api/v1/profile-imports/<import-id>/confirm" \
+  -H 'Content-Type: application/json' -d '{"reason":"现场 CSV 验收"}'
+```
+
+确认时不接受任何错误：只有**整批**每个剖面都通过全部规则（且加上本批后不超过 2000 个剖面），才会在**同一次原子写入**中为每组各创建一个草拟剖面（带分层，仍有缺口可稍后补录，锁定前再检查连续性）。若有错误，确认返回 HTTP 422，响应体同时给出标准错误和带行号的失败预览，不创建任何剖面，并把任务持久化为 `failed`。任务状态为 `preview / completed / failed`：
+
+- 同一份 CSV 重复上传返回同一任务（首次 201，之后 200）；
+- `completed` 或 `failed` 的任务再次确认一律 409，不能重复执行；
+- 完成后 `profile_ids` 按预览顺序列出新建的剖面编号；这些剖面走原有编录、覆盖、锁定、历史接口，与手工创建的剖面完全一致。
+
+导入预览只是快照中新增的独立数据，不改变既有剖面/版本/对比结构；不含导入数据的旧快照仍可正常加载。
+
 ## HTTP 接口
 
 接口统一前缀 `/api/v1`，请求体类型 `application/json`，最大 4 MiB；拒绝未知 JSON 字段及多个连续 JSON 对象。应用错误采用 `{"error":{"code":"invalid","field":"depth_mm","detail":"..."}}`。HTTP 422 表示字段错误，409 表示状态或版本冲突，404 表示资源缺失，415 表示请求类型错误，413 表示体积超限，500 表示内部故障。不存在的路由和不支持的方法使用 Go HTTP 的 404/405 响应。
@@ -94,6 +121,9 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /comparisons` | 可选 `profile_id, offset, limit` |
 | `GET /comparisons/{id}` | 已保存的完整对比结果 |
 | `GET /comparisons/{id}/csv` | 区间 CSV |
+| `POST /profile-imports` | `text/csv` 批量导入，返回按剖面归组的预览（首次 201，重复文件 200） |
+| `GET /profile-imports/{id}` | 查询导入任务、预览与错误（重启后仍可查） |
+| `POST /profile-imports/{id}/confirm` | 可选 JSON `{ "reason": "..." }`；整批通过才创建剖面 |
 
 上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
 
@@ -118,9 +148,9 @@ python3 scripts/smoke.py all
 STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 ```
 
-**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
+**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse / imports` 五个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页，以及 CSV 批量导入的预览分组、行号/原始字段错误、整批原子确认、终态不可重复和重启可查。
 
 ## 目录
 
@@ -130,6 +160,7 @@ internal/api/        JSON、路由、查询参数和请求记录
 internal/catalog/    编录、修订、查阅和对比工作流
 internal/geology/    分层规则、覆盖、深度查询和版本差异
 internal/correlation/区间对比、标志层偏移与 CSV
+internal/importing/ 批量 CSV 解析与带行号的归组预览
 internal/persistence/快照校验、原子替换、独占锁
 internal/config/     环境变量与启动参数
 scripts/smoke.py      临时环境 HTTP 运行验证

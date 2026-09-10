@@ -12,10 +12,11 @@
 2. 锁定与修订：检查连续性、锁定版本、读取历史、重新打开并修订。锁定失败保留原状态。
 3. 对比：选定两个已经锁定的历史版本，指定右侧深度偏移，按双方边界切分共同区间，计算岩性相同长度和比例，保存不可变结果。相同输入复用同一结果。
 对比辅助接口 POST /api/v1/comparison-offsets 使用共同标志层所需偏移的中位数提供建议，并输出残差，用户显式采纳后才生成结果。
-4. 查阅：按岩性、地点、名称和状态筛选剖面，分页读取历史事件与分层；读取对比结果的 JSON 或 CSV。GET /profiles/{id}/at 可查询当前或历史版本中的某一深度；GET /profiles/{id}/diff 按区间和元数据字段展示历史差异。
+4. 批量导入：以 text/csv 提交整批分层行，先得到按剖面归组、带原始行号和原始字段的持久化预览；确认时整批全部通过既有深度、岩性和标志层规则才在同一原子写入中创建草拟剖面，任一错误则整批不创建并将任务置为失败。已完成或失败的导入不可重复执行，预览与状态随快照持久化且重启可查。
+5. 查阅：按岩性、地点、名称和状态筛选剖面，分页读取历史事件与分层；读取对比结果的 JSON 或 CSV。GET /profiles/{id}/at 可查询当前或历史版本中的某一深度；GET /profiles/{id}/diff 按区间和元数据字段展示历史差异。
 
 ## 模块与接口
-cmd/stratad 提供启动入口。internal/api 处理 HTTP；internal/catalog 编排剖面工作流；internal/geology 实现深度、状态和验证；internal/correlation 计算共同区间；internal/persistence 负责快照、锁和数据恢复；internal/config 解析环境变量和启动参数。完整接口见 README。
+cmd/stratad 提供启动入口。internal/api 处理 HTTP；internal/catalog 编排剖面工作流；internal/geology 实现深度、状态和验证；internal/correlation 计算共同区间；internal/importing 解析批量 CSV 并生成带行号的预览；internal/persistence 负责快照、锁和数据恢复；internal/config 解析环境变量和启动参数。完整接口见 README。
 
 ## 验证计划
 默认 testing=deferred，不生成测试文件和测试数据。后续专项测试任务添加单元测试和浏览器无关的 API 回归测试。当前使用临时数据目录启动真实 HTTP 服务，执行编录、锁定修订、对比和查阅生产冒烟流程，并检查失败边界和重启恢复。所有检查有超时且不访问外网。

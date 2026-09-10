@@ -96,6 +96,34 @@ class Server:
                 raise RuntimeError(f'{method} {path}: expected {expected}, got {response.status}: {payload.decode()}')
         return payload.decode() if raw else json.loads(payload)
 
+    def call_csv(self, path, text, expected=200, method='POST', ctype='text/csv; charset=utf-8'):
+        request = urllib.request.Request(self.url + path, data=text.encode('utf-8'), method=method,
+                                         headers={'Content-Type': ctype})
+        try:
+            response = urllib.request.urlopen(request, timeout=10)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            payload = response.read()
+            if response.status != expected:
+                raise RuntimeError(f'{method} {path}: expected {expected}, got {response.status}: {payload.decode()}')
+            location = response.headers.get('Location')
+            status = response.status
+        parsed = None if not payload else json.loads(payload)
+        return parsed, location, status
+
+    def call_status(self, method, path, body=None):
+        data = None if body is None else json.dumps(body, ensure_ascii=False).encode()
+        request = urllib.request.Request(self.url + path, data=data, method=method,
+                                         headers={'Content-Type': 'application/json'})
+        try:
+            response = urllib.request.urlopen(request, timeout=10)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            payload = response.read()
+            return response.status, (json.loads(payload) if payload else None)
+
 
 def create(s, name='北坡剖面', site='赤石岭', depth=10000):
     return s.call('POST', '/api/v1/profiles', dict(name=name, site=site, depth_mm=depth, note='岩层编录'), 201)
@@ -243,11 +271,124 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def imports(s):
+    header = 'name,site,depth_mm,note,top_mm,bottom_mm,rock,description,marker'
+    good = '\r\n'.join([
+        header,
+        '东沟剖面,东沟,10000,砂泥岩序列,0,4000,sandstone,细砂岩,',
+        '东沟剖面,东沟,10000,砂泥岩序列,4000,10000,mudstone,泥岩,凝灰标志',
+        '西梁剖面,西梁,6000,灰岩剖面,0,6000,limestone,灰岩,',
+    ]) + '\r\n'
+
+    # media type checks
+    request = urllib.request.Request(s.url + '/api/v1/profile-imports', data=b'x', method='POST',
+                                     headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raise AssertionError('expected 415, got ' + str(response.status))
+    except urllib.error.HTTPError as error:
+        assert error.code == 415, error.code
+        error.read()
+
+    # structural CSV problems never reach a preview (422)
+    for bad in [header + '\n', 'nope,rock\n', 'name,site,depth_mm,note,top_mm,bottom_mm,rock,description,marker,extra\n']:
+        payload, _, status = s.call_csv('/api/v1/profile-imports', bad, expected=422)
+        assert payload['error']['code'] == 'invalid'
+
+    job, location, status = s.call_csv('/api/v1/profile-imports', good, expected=201)
+    assert status == 201 and location == '/api/v1/profile-imports/' + job['id']
+    assert job['status'] == 'preview'
+    assert [g['name'] for g in job['groups']] == ['东沟剖面', '西梁剖面']
+    east = job['groups'][0]
+    assert east['depth_mm'] == 10000 and len(east['layers']) == 2
+    assert east['layers'][0]['line'] == 2 and east['layers'][1]['line'] == 3
+    assert 'source_csv' not in job
+    assert s.call('GET', f"/api/v1/profile-imports/{job['id']}")['id'] == job['id']
+
+    # identical file reuses the same job, never runs it twice
+    again, _, status = s.call_csv('/api/v1/profile-imports', good, expected=200)
+    assert status == 200 and again['id'] == job['id']
+
+    # bad batch: line-numbered errors with raw fields, nothing is created
+    bad = '\n'.join([
+        header,
+        '北坡,北坡,10000,n,0,5000,sandstone,好,',
+        '北坡,北坡,10000,n,4000,10000,mudstone,重叠,',
+        '北坡,北坡,9000,n,0,1000,sandstone,深度不一致,',
+        '南坡,南坡,8000,n,0,9000,granite,错岩性,',
+        '东坡,东坡,abc,n,0,1000,sandstone,深度非整数,',
+        '西坡,西坡,10000,n,1000,500,sandstone,非正厚度,',
+        ' ,北坡,10000,n,0,1000,sandstone,无名称,',
+        '北坡,北坡,10000,n,0,1000,sandstone,缺列',
+    ])
+    badjob, _, _ = s.call_csv('/api/v1/profile-imports', bad, expected=201)
+    assert badjob['status'] == 'preview' and badjob['groups']
+    lines = {e['line']: e for e in badjob['errors']}
+    assert set(lines) == {2, 4, 5, 6, 7, 8, 9}, lines
+    # overlap is reported on the earlier layer's line and keeps that raw row
+    assert lines[2]['field'] == 'layers' and lines[2]['detail'] == '分层不能重叠'
+    assert lines[2]['raw']['rock'] == 'sandstone'
+    assert lines[4]['field'] == 'depth_mm' and lines[4]['raw']['depth_mm'] == '9000'
+    assert lines[5]['field'] == 'rock' and lines[5]['raw']['rock'] == 'granite'
+    assert lines[6]['field'] == 'depth_mm'
+    assert lines[7]['field'] == 'layers' and lines[7]['raw']['bottom_mm'] == '500'
+    assert lines[8]['field'] == 'name' and lines[8]['raw']['name'] == ' '
+    assert lines[9]['field'] == 'row' and lines[9]['raw']['rock'] == 'sandstone'
+    assert lines[9]['raw']['marker'] == '' and lines[9]['raw']['description'] == '缺列'
+
+    status, payload = s.call_status('POST', f"/api/v1/profile-imports/{badjob['id']}/confirm")
+    assert status == 422 and payload['import']['status'] == 'failed'
+    assert payload['import']['id'] == badjob['id']
+    # failed import cannot run again
+    status, payload = s.call_status('POST', f"/api/v1/profile-imports/{badjob['id']}/confirm", {'reason': '重试'})
+    assert status == 409, status
+    # nothing was created for the bad batch
+    assert s.call('GET', '/api/v1/profiles?q=' + urllib.parse.quote('北坡'))['total'] == 0
+
+    # preview survives restart
+    s.stop()
+    s.start()
+    reloaded = s.call('GET', f"/api/v1/profile-imports/{badjob['id']}")
+    assert reloaded['status'] == 'failed' and len(reloaded['errors']) == len(badjob['errors'])
+
+    # confirming the clean batch creates drafts atomically
+    status, payload = s.call_status('POST', f"/api/v1/profile-imports/{job['id']}/confirm", {'reason': '现场 CSV 验收'})
+    assert status == 200, payload
+    completed = payload
+    assert completed['status'] == 'completed' and len(completed['profile_ids']) == 2
+    east_id, west_id = completed['profile_ids']
+    east_now = s.call('GET', f'/api/v1/profiles/{east_id}')
+    assert east_now['version'] == 1 and east_now['state'] == 'draft'
+    assert [l['rock'] for l in east_now['layers']] == ['sandstone', 'mudstone']
+    assert east_now['layers'][1]['marker'] == '凝灰标志'
+    history = s.call('GET', f'/api/v1/profiles/{east_id}/history')
+    assert history['items'][0]['reason'] == '现场 CSV 验收'
+    west_now = s.call('GET', f'/api/v1/profiles/{west_id}')
+    assert west_now['depth_mm'] == 6000 and west_now['layers'][0]['rock'] == 'limestone'
+
+    # completed import cannot run again, and re-upload cannot re-execute
+    assert s.call_status('POST', f"/api/v1/profile-imports/{job['id']}/confirm", {'reason': '再试'})[0] == 409
+    again, _, status = s.call_csv('/api/v1/profile-imports', good, expected=200)
+    assert again['status'] == 'completed' and again['profile_ids'] == completed['profile_ids']
+    assert s.call_status('POST', f"/api/v1/profile-imports/{job['id']}/confirm")[0] == 409
+
+    # missing import is 404, including at confirmation
+    s.call('GET', '/api/v1/profile-imports/imp_' + '0' * 32, expected=404)
+    assert s.call_status('POST', '/api/v1/profile-imports/imp_' + '0' * 32 + '/confirm', {'reason': 'x'})[0] == 404
+
+    # restart with completed imports: profiles and import status both recover
+    s.stop()
+    s.start()
+    assert s.call('GET', f'/api/v1/profiles/{east_id}') == east_now
+    final = s.call('GET', f"/api/v1/profile-imports/{job['id']}")
+    assert final['status'] == 'completed' and final['profile_ids'] == completed['profile_ids']
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'imports', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'imports'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)
