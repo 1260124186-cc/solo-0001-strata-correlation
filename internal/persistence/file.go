@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
 	"io"
 	"os"
 	"path/filepath"
@@ -44,6 +45,9 @@ func readSnapshot(path string) (State, error) {
 	var state State
 	if err = json.Unmarshal(env.Data, &state); err != nil {
 		return State{}, err
+	}
+	if state.Interpretations == nil {
+		state.Interpretations = map[string][]correlation.InterpretationRevision{}
 	}
 	if err = state.Validate(); err != nil {
 		return State{}, fmt.Errorf("snapshot validation: %w", err)

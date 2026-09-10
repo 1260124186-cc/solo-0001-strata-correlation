@@ -223,6 +223,53 @@ def compare(s):
     assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
 
 
+def interpret(s):
+    a, b = sealed(s, '解释西剖面'), sealed(s, '解释东剖面', 6000)
+    left, right = dict(id=a['id'], version=3), dict(id=b['id'], version=3)
+    # 两个对应区间隐含的深度偏移不同（0 与 2500），同一份解释不要求共用单一偏移
+    pairs = [dict(left_top_mm=0, left_bottom_mm=4000, right_top_mm=0, right_bottom_mm=6000),
+             dict(left_top_mm=4000, left_bottom_mm=10000, right_top_mm=6500, right_bottom_mm=10000)]
+    body = dict(left=left, right=right, pairs=pairs, rationale='标志层与岩性组合一致', confidence='high')
+    itp = s.call('POST', '/api/v1/interpretations', body, 201)
+    assert itp['version'] == 1 and itp['state'] == 'draft' and itp['pairs'] == pairs
+    out_of_range = [dict(left_top_mm=0, left_bottom_mm=20000, right_top_mm=0, right_bottom_mm=6000)]
+    s.call('POST', '/api/v1/interpretations', {**body, 'pairs': out_of_range}, 422)
+    draft = replace(s, create(s, '未锁定解释剖面'), layers())
+    s.call('POST', '/api/v1/interpretations', {**body, 'right': dict(id=draft['id'], version=2)}, 409)
+    s.call('POST', '/api/v1/interpretations', {**body, 'confidence': 'maybe'}, 422)
+    s.call('POST', '/api/v1/interpretations', {**body, 'pairs': []}, 422)
+    s.call('POST', '/api/v1/interpretations', {**body, 'right': left}, 422)
+    s.call('POST', '/api/v1/interpretations', {**body, 'extra': 1}, 422)
+    edited = s.call('PUT', f'/api/v1/interpretations/{itp["id"]}',
+                    dict(expected_version=1, pairs=pairs[:1], rationale='仅保留标志层段对应', confidence='medium', reason='补充证据后调整'))
+    assert edited['version'] == 2 and edited['state'] == 'draft' and len(edited['pairs']) == 1
+    s.call('PUT', f'/api/v1/interpretations/{itp["id"]}',
+           dict(expected_version=1, pairs=pairs[:1], rationale='过期版本', confidence='low', reason='版本冲突检查'), 409)
+    final = s.call('POST', f'/api/v1/interpretations/{itp["id"]}/finalize',
+                   dict(expected_version=2, reason='评审通过'))
+    assert final['version'] == 3 and final['state'] == 'final' and final['pairs'] == edited['pairs']
+    s.call('POST', f'/api/v1/interpretations/{itp["id"]}/finalize', dict(expected_version=3, reason='重复定稿'), 409)
+    revised = s.call('PUT', f'/api/v1/interpretations/{itp["id"]}',
+                     dict(expected_version=3, pairs=pairs, rationale='重新纳入全段对应', confidence='high', reason='新钻孔资料'))
+    assert revised['version'] == 4 and revised['state'] == 'draft' and revised['pairs'] == pairs
+    locked = s.call('GET', f'/api/v1/interpretations/{itp["id"]}/revisions/3')
+    assert locked['interpretation'] == final and locked['event']['action'] == 'finalize'
+    history = s.call('GET', f'/api/v1/interpretations/{itp["id"]}/history')
+    assert [e['action'] for e in history['items']] == ['create', 'edit', 'finalize', 'revise']
+    page = s.call('GET', f'/api/v1/interpretations?profile_id={a["id"]}&state=draft')
+    assert page['total'] == 1 and page['items'][0]['id'] == itp['id']
+    assert s.call('GET', f'/api/v1/interpretations?profile_id={a["id"]}&state=final')['total'] == 0
+    s.call('GET', '/api/v1/interpretations?state=unknown', expected=422)
+    s.call('GET', '/api/v1/interpretations/int_' + '0' * 32, expected=404)
+    assert s.call('GET', f'/api/v1/profiles/{a["id"]}') == a
+    comparison = s.call('POST', '/api/v1/comparisons', dict(left=left, right=right, offset_mm=0), 201)
+    s.stop()
+    s.start()
+    assert s.call('GET', f'/api/v1/interpretations/{itp["id"]}') == revised
+    assert s.call('GET', f'/api/v1/interpretations/{itp["id"]}/revisions/3')['interpretation'] == final
+    assert s.call('GET', f'/api/v1/comparisons/{comparison["id"]}') == comparison
+
+
 def browse(s):
     a = sealed(s, '赤石北剖面')
     b = create(s, '赤石南剖面')
@@ -245,9 +292,9 @@ def browse(s):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'interpret', 'browse', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'interpret', 'browse'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

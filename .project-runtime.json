@@ -20,6 +20,10 @@
       "command": "python3 scripts/smoke.py compare"
     },
     {
+      "workflow_id": "interpret",
+      "command": "python3 scripts/smoke.py interpret"
+    },
+    {
       "workflow_id": "browse",
       "command": "python3 scripts/smoke.py browse"
     }
