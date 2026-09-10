@@ -111,16 +111,39 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 ## 构建与验证
 
+本地与 CI 共用同一入口 `scripts/verify.sh`，按阶段执行；任一阶段失败即停止，日志和退出码标明停在哪个阶段：
+
 ```bash
-go build ./...
-go vet ./...
-python3 scripts/smoke.py all
-STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
+scripts/verify.sh           # 依次执行 build → vet → smoke
+scripts/verify.sh build     # go build ./...
+scripts/verify.sh vet       # go vet ./...
+scripts/verify.sh smoke     # 四组 HTTP 冒烟：record / seal / compare / browse
+scripts/verify.sh race      # 可选竞态检查（高成本，前提见下）
+STRATA_VERIFY_RACE=1 scripts/verify.sh   # 默认流程后追加竞态阶段
 ```
 
-**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
+冒烟阶段在系统临时目录编译并启动真实 HTTP 服务，通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据；入口脚本被中断（Ctrl-C / SIGTERM）时会把信号转给当前阶段，确保服务进程和临时编译产物不遗留。不会访问外网或修改现有数据目录。各阶段也可直接运行底层命令：`go build ./...`、`go vet ./...`、`python3 scripts/smoke.py all`（或分别运行 `record / seal / compare / browse`）。
+
+**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。验证入口因此刻意不执行 `go test`：没有测试文件时它只会空转通过，不能作为覆盖证明。当前的运行验证以 `scripts/smoke.py` 的四组 HTTP 工作流为准。
 
 验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+
+### 竞态检查（可选，高成本）
+
+竞态阶段用 `go build -race` 构建并完整运行四组冒烟工作流，构建和运行成本明显高于默认流程，因此不进入默认入口，仅在显式请求时执行。运行前提：
+
+- `CGO_ENABLED=1`（本机构建默认开启）并装有 C 工具链：Linux 为 gcc，macOS 为 Xcode 命令行工具；
+- 平台为竞态检测器支持的 Linux / macOS（x86_64 或 arm64）；
+- 预留明显高于普通运行的时间和内存。
+
+```bash
+scripts/verify.sh race                              # 四组工作流全部运行竞态版本
+STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal   # 只运行单组
+```
+
+### 持续集成
+
+`.github/workflows/ci.yml` 在 Ubuntu 与 macOS 上运行同一入口的 build / vet / smoke 阶段，推送和合并请求时触发；竞态检查为手动触发（Actions → verify → Run workflow 并勾选 race），只在 Ubuntu 上运行。
 
 ## 目录
 
@@ -132,5 +155,6 @@ internal/geology/    分层规则、覆盖、深度查询和版本差异
 internal/correlation/区间对比、标志层偏移与 CSV
 internal/persistence/快照校验、原子替换、独占锁
 internal/config/     环境变量与启动参数
+scripts/verify.sh     本地与 CI 共用的分阶段验证入口
 scripts/smoke.py      临时环境 HTTP 运行验证
 ```
