@@ -275,7 +275,17 @@ def exchange(s):
     uploaded = s.call('POST', '/api/v1/exchange-packages/inspect', downloaded)
     assert uploaded['valid'] and uploaded['package_id'] == downloaded['package_id']
     assert uploaded['package_closure_complete'] and uploaded['service_closure_complete']
-    tampered = json.loads(json.dumps(downloaded, ensure_ascii=False))
+
+    reordered_json = json.dumps(downloaded, ensure_ascii=False, sort_keys=True)
+    reordered_request = urllib.request.Request(
+        s.url + '/api/v1/exchange-packages/inspect', data=reordered_json.encode(), method='POST',
+        headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(reordered_request, timeout=10) as response:
+        assert response.status == 200
+        reordered = json.loads(response.read())
+    assert reordered['valid'] and reordered['content_digest'] == downloaded['content_digest']
+
+    tampered = json.loads(reordered_json)
     tampered['payload']['histories'][0]['revisions'][0]['profile']['note'] = '篡改内容'
     tampered_check = s.call('POST', '/api/v1/exchange-packages/inspect', tampered, 422)
     assert not tampered_check['valid'] and any('摘要' in issue or '闭包' in issue for issue in tampered_check['issues'])

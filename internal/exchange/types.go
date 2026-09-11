@@ -132,12 +132,19 @@ type Dataset struct {
 	Comparisons map[string]correlation.Result
 }
 
+// canonical renders JSON using its data semantics, not the sender's object key
+// order or insignificant whitespace. All package digests therefore survive a
+// harmless reordering of the same JSON document.
 func canonical(value any) ([]byte, error) {
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
-	return raw, nil
+	var normalized any
+	if err := json.Unmarshal(raw, &normalized); err != nil {
+		return nil, err
+	}
+	return json.Marshal(normalized)
 }
 
 func digestValue(value any) (string, error) {

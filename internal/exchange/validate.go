@@ -278,11 +278,11 @@ func strictJSON(raw []byte, dst any) error {
 }
 
 func jsonEqual(a, b any) bool {
-	ra, err := json.Marshal(a)
+	ra, err := canonical(a)
 	if err != nil {
 		return false
 	}
-	rb, err := json.Marshal(b)
+	rb, err := canonical(b)
 	if err != nil {
 		return false
 	}
