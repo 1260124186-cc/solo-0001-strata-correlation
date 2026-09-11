@@ -16,6 +16,10 @@
       "command": "python3 scripts/smoke.py seal"
     },
     {
+      "workflow_id": "adopt",
+      "command": "python3 scripts/smoke.py adopt"
+    },
+    {
       "workflow_id": "compare",
       "command": "python3 scripts/smoke.py compare"
     },

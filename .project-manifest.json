@@ -87,6 +87,25 @@
       ]
     },
     {
+      "id": "adopt",
+      "name": "采用历史",
+      "entry": "POST /api/v1/profiles/{id}/adopt",
+      "steps": [
+        "require reopened draft and expected version",
+        "copy metadata and layers from a historical revision of the same profile",
+        "append a new draft revision with source provenance"
+      ],
+      "success": "new draft revision continues independently, history retained",
+      "failure": "sealed current revision, stale version, or missing or non-prior source rejected",
+      "verification": "bounded HTTP workflow smoke check",
+      "module_ids": [
+        "api",
+        "catalog",
+        "geology",
+        "persistence"
+      ]
+    },
+    {
       "id": "compare",
       "name": "剖面对比",
       "entry": "POST /api/v1/comparisons",
