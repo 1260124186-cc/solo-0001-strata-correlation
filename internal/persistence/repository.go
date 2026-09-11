@@ -18,6 +18,16 @@ type Repository struct {
 	fault  error
 }
 
+// CommitError 报告快照保存失败。Committed 为 true 表示新状态已越过提交点
+// （原子替换完成），对应修改必须视为已生效；为 false 表示内存与磁盘均未改变。
+type CommitError struct {
+	Committed bool
+	Err       error
+}
+
+func (e *CommitError) Error() string { return "persist snapshot: " + e.Err.Error() }
+func (e *CommitError) Unwrap() error { return e.Err }
+
 func Open(dir string) (*Repository, error) {
 	absolute, err := filepath.Abs(dir)
 	if err != nil {
@@ -87,7 +97,7 @@ func (r *Repository) Update(ctx context.Context, fn func(*State) (bool, error)) 
 		if committed {
 			r.fault = err
 		}
-		return fmt.Errorf("persist snapshot: %w", err)
+		return &CommitError{Committed: committed, Err: err}
 	}
 	return nil
 }

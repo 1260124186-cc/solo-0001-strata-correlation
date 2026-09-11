@@ -259,6 +259,56 @@ def batch(s):
     history = s.call('GET', f'/api/v1/profiles/{a["id"]}/history')
     assert [x['action'] for x in history['items']] == ['create', 'layers', 'seal', 'reopen', 'metadata']
     assert s.call('GET', f'/api/v1/profiles/{b["id"]}')['version'] == 2
+    if os.geteuid() != 0:
+        data = s.directory / 'data'
+        # 只读目录：快照到不了提交点，整批未保存，但仍逐项报告
+        data.chmod(0o555)
+        try:
+            denied = s.call('POST', '/api/v1/profiles/batch', dict(items=[
+                dict(id=a['id'], action='metadata', expected_version=5, reason='目录只读',
+                     metadata=dict(name='不应保存', site='赤石岭', depth_mm=10000, note='')),
+                dict(id=b['id'], action='layers', expected_version=9, reason='版本错误', layers=layers()),
+            ]), 500)
+        finally:
+            data.chmod(0o700)
+        assert denied['committed'] is False and denied['error']['code'] == 'persistence'
+        first, second = denied['results']
+        assert first['ok'] is False and first['error']['code'] == 'persistence'
+        assert second['ok'] is False and second['error']['code'] == 'conflict'
+        s.call('GET', '/healthz')
+        assert s.call('GET', f'/api/v1/profiles/{a["id"]}')['version'] == 5
+        # 未进入故障状态，恢复可写后整批可安全重试
+        retry = s.call('POST', '/api/v1/profiles/batch', dict(items=[
+            dict(id=a['id'], action='metadata', expected_version=5, reason='恢复可写',
+                 metadata=dict(name='批量甲定', site='赤石岭', depth_mm=10000, note='')),
+        ]))['results'][0]
+        assert retry['ok'] and retry['version'] == 6
+        # 提交点后目录同步失败：修订已生效，响应必须明确指出
+        data.chmod(0o300)
+        try:
+            stuck = s.call('POST', '/api/v1/profiles/batch', dict(items=[
+                dict(id=a['id'], action='seal', expected_version=6, reason='提交后同步失败'),
+                dict(id=b['id'], action='layers', expected_version=2, reason='乙改分层', layers=layers(3000)),
+            ]), 500)
+        finally:
+            data.chmod(0o700)
+        assert stuck['committed'] is True and stuck['error']['code'] == 'persistence'
+        first, second = stuck['results']
+        assert first['ok'] and first['version'] == 7 and first['state'] == 'sealed'
+        assert second['ok'] and second['version'] == 3
+        s.call('GET', '/healthz', expected=503)
+        rejected = s.call('POST', '/api/v1/profiles/batch', dict(items=[
+            dict(id=a['id'], action='reopen', expected_version=7, reason='故障中应被拒绝'),
+        ]), 500)
+        assert 'results' not in rejected
+        assert s.call('GET', f'/api/v1/profiles/{a["id"]}')['version'] == 7
+        s.stop()
+        s.start()
+        # 重启后核对：响应中 committed=true 的修订确实已持久化
+        current = s.call('GET', f'/api/v1/profiles/{a["id"]}')
+        assert current['version'] == 7 and current['state'] == 'sealed'
+        assert s.call('GET', f'/api/v1/profiles/{b["id"]}')['version'] == 3
+        s.call('GET', '/healthz')
 
 
 def browse(s):

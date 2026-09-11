@@ -30,9 +30,21 @@ type BatchResult struct {
 	Error   *geology.Problem `json:"error,omitempty"`
 }
 
+// SaveError 表示批量修订已完成逐项校验，但快照保存失败。Committed 为 true 时
+// 结果中标记成功的修订已生效（服务进入故障状态，需重启）；为 false 时未保存
+// 任何内容，调用方修正原因后可安全重试整批。
+type SaveError struct {
+	Committed bool
+	Err       error
+}
+
+func (e *SaveError) Error() string { return "batch snapshot save failed: " + e.Err.Error() }
+func (e *SaveError) Unwrap() error { return e.Err }
+
 // Batch 在一次快照写入中修订多份剖面。原子边界落在单项上：每项独立校验，
 // 失败的项不修改对应剖面，成功的项合并为一次原子落盘。批次整体不是原子单位，
-// 返回顺序与请求一致，逐项报告成功版本或失败原因。
+// 返回顺序与请求一致，逐项报告成功版本或失败原因。快照保存失败时同样返回
+// 逐项结果，并以 SaveError.Committed 区分修订是否已经生效。
 func (s *Service) Batch(ctx context.Context, items []BatchItem) ([]BatchResult, error) {
 	results := make([]BatchResult, len(items))
 	err := s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
@@ -51,7 +63,21 @@ func (s *Service) Batch(ctx context.Context, items []BatchItem) ([]BatchResult, 
 		return changed, nil
 	})
 	if err != nil {
-		return nil, err
+		var commitErr *persistence.CommitError
+		if !errors.As(err, &commitErr) {
+			return nil, err
+		}
+		if !commitErr.Committed {
+			// 未越过提交点：内存与磁盘均未改变，通过校验的项改报为未写入，
+			// 保证 ok=true 只表示修订已生效。
+			for i := range results {
+				if results[i].OK {
+					results[i].OK = false
+					results[i].Error = &geology.Problem{Code: "persistence", Detail: "校验通过，但快照保存失败，该修订未写入"}
+				}
+			}
+		}
+		return results, &SaveError{Committed: commitErr.Committed, Err: commitErr.Err}
 	}
 	return results, nil
 }
