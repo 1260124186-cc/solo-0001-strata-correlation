@@ -121,15 +121,13 @@ func Validate(e Envelope) (bool, []string) {
 	for id, result := range comparisonPayloads {
 		left, leftErr := revisionFromHistory(historyByID, result.Request.Left.ID, result.Request.Left.Version)
 		right, rightErr := revisionFromHistory(historyByID, result.Request.Right.ID, result.Request.Right.Version)
+		if leftErr != nil {
+			addIssue("对比结果引用了无效的左侧剖面版本: " + id)
+		}
+		if rightErr != nil {
+			addIssue("对比结果引用了无效的右侧剖面版本: " + id)
+		}
 		if leftErr != nil || rightErr != nil {
-			if expectedComplete || !hasMissingRefsForComparison(e.Payload.MissingReferences, result) {
-				if leftErr != nil {
-					addIssue("对比结果引用了无效的左侧剖面版本: " + id)
-				}
-				if rightErr != nil {
-					addIssue("对比结果引用了无效的右侧剖面版本: " + id)
-				}
-			}
 			continue
 		}
 		computed, err := correlation.Align(left.Profile, right.Profile, result.Request, result.CreatedAt)
@@ -193,7 +191,7 @@ func Validate(e Envelope) (bool, []string) {
 					p := revision.Profile
 					want := RevisionSummary{ProfileID: p.ID, Version: p.Version, State: p.State, Name: p.Name, Site: p.Site, DepthMM: p.DepthMM, LayerCount: len(p.Layers), UpdatedAt: p.UpdatedAt, Digest: revDigest}
 					if summary.Versions[j] != p.Version || summary.Revisions[j] != want {
-						addIssue("剖面版本内容摘要不匹配: "+member.ID)
+						addIssue("剖面版本内容摘要不匹配: " + member.ID)
 						break
 					}
 				}
@@ -212,7 +210,7 @@ func Validate(e Envelope) (bool, []string) {
 			var summary ComparisonSummary
 			wantDigest := digest
 			want := ComparisonSummary{ID: result.ID, Algorithm: result.Algorithm, Left: result.Request.Left, Right: result.Request.Right, OffsetMM: result.Request.OffsetMM, OverlapMM: result.OverlapMM, KnownMM: result.KnownMM, EqualMM: result.EqualMM, Similarity: result.Similarity, SegmentCount: len(result.Segments), MarkerCount: len(result.Markers), CreatedAt: result.CreatedAt, Digest: wantDigest}
-			if err := strictJSON(member.Summary, &summary); err != nil || summary != want {
+			if err := strictJSON(member.Summary, &summary); err != nil || !jsonEqual(want, summary) {
 				addIssue("对比结果内容摘要不匹配: " + result.ID)
 			}
 			memberComparison++
@@ -281,9 +279,13 @@ func strictJSON(raw []byte, dst any) error {
 
 func jsonEqual(a, b any) bool {
 	ra, err := json.Marshal(a)
-	if err != nil { return false }
+	if err != nil {
+		return false
+	}
 	rb, err := json.Marshal(b)
-	if err != nil { return false }
+	if err != nil {
+		return false
+	}
 	return bytes.Equal(ra, rb)
 }
 

@@ -32,8 +32,8 @@ func Build(data Dataset, input []Selection) (Envelope, error) {
 	// Queue items use references so each expansion can identify the material
 	// that introduced it in an error/missing report.
 	type job struct {
-		target  Reference
-		via     Reference
+		target   Reference
+		via      Reference
 		relation string
 	}
 	var queue []job
@@ -66,7 +66,7 @@ func Build(data Dataset, input []Selection) (Envelope, error) {
 			}
 			if !comparisonIDs[sel.ID] {
 				comparisonIDs[sel.ID] = true
-				queue = append(queue, job{target: Reference{Kind: KindComparison, ID: sel.ID}, via: Reference{Kind: "selection"}, Relation: "selected"})
+				queue = append(queue, job{target: Reference{Kind: KindComparison, ID: sel.ID}, via: Reference{Kind: "selection"}, relation: "selected"})
 			}
 		}
 	}
@@ -75,7 +75,7 @@ func Build(data Dataset, input []Selection) (Envelope, error) {
 		current := queue[0]
 		queue = queue[1:]
 		if current.target.Kind == KindProfileHistory {
-			history, exists := data.Histories[current.target.ID]
+			_, exists := data.Histories[current.target.ID]
 			if !exists {
 				addMissing(MissingReference{Kind: KindProfileHistory, ID: current.target.ID, ReferencedBy: current.via, Relation: current.relation})
 				continue
@@ -111,7 +111,7 @@ func Build(data Dataset, input []Selection) (Envelope, error) {
 			continue
 		}
 		for _, ref := range []struct {
-			ref correlation.Reference
+			ref  correlation.Reference
 			side string
 		}{
 			{result.Request.Left, "comparison_left"}, {result.Request.Right, "comparison_right"},
@@ -155,7 +155,6 @@ func Build(data Dataset, input []Selection) (Envelope, error) {
 			if p.State == geology.Sealed {
 				summary.SealedRevisionCount++
 			}
-			sealedCountByHistory[id] = summary.SealedRevisionCount
 			revDigest, err := digestValue(revision)
 			if err != nil {
 				return Envelope{}, err
@@ -206,9 +205,15 @@ func Build(data Dataset, input []Selection) (Envelope, error) {
 
 	sort.Slice(missing, func(i, j int) bool {
 		a, b := missing[i], missing[j]
-		if a.Kind != b.Kind { return a.Kind < b.Kind }
-		if a.ID != b.ID { return a.ID < b.ID }
-		if a.Version != b.Version { return a.Version < b.Version }
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
+		if a.ID != b.ID {
+			return a.ID < b.ID
+		}
+		if a.Version != b.Version {
+			return a.Version < b.Version
+		}
 		return missingKey(a) < missingKey(b)
 	})
 
@@ -221,9 +226,9 @@ func Build(data Dataset, input []Selection) (Envelope, error) {
 	}
 	manifest := Manifest{Format: Format, Members: members, MissingReferences: missing}
 	contentDigest, err := digestValue(struct {
-		Format   string    `json:"format"`
-		Payload  Payload   `json:"payload"`
-		Manifest Manifest  `json:"manifest"`
+		Format   string   `json:"format"`
+		Payload  Payload  `json:"payload"`
+		Manifest Manifest `json:"manifest"`
 	}{Format: Format, Payload: payload, Manifest: manifest})
 	if err != nil {
 		return Envelope{}, err
@@ -242,11 +247,11 @@ func Build(data Dataset, input []Selection) (Envelope, error) {
 		status = StatusIncomplete
 	}
 	return Envelope{
-		Format:        Format,
-		PackageID:     packageIDFromDigest(contentDigest),
-		SelectionKey:  key,
-		Status:        status,
-		Complete:      complete,
+		Format:       Format,
+		PackageID:    packageIDFromDigest(contentDigest),
+		SelectionKey: key,
+		Status:       status,
+		Complete:     complete,
 		Summary: Summary{
 			HistoryCount:          len(histories),
 			RevisionCount:         revisionCount,
@@ -283,8 +288,12 @@ func NormalizeSelections(input []Selection) ([]Selection, error) {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Type != out[j].Type { return out[i].Type < out[j].Type }
-		if out[i].ID != out[j].ID { return out[i].ID < out[j].ID }
+		if out[i].Type != out[j].Type {
+			return out[i].Type < out[j].Type
+		}
+		if out[i].ID != out[j].ID {
+			return out[i].ID < out[j].ID
+		}
 		return out[i].Version < out[j].Version
 	})
 	unique := out[:0]

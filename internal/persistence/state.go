@@ -14,7 +14,7 @@ type State struct {
 	Schema      int                           `json:"schema"`
 	Histories   map[string][]geology.Revision `json:"histories"`
 	Comparisons map[string]correlation.Result `json:"comparisons"`
-	Packages    map[string]exchange.Envelope `json:"packages,omitempty"`
+	Packages    map[string]exchange.Envelope  `json:"packages,omitempty"`
 }
 
 func emptyState() State {

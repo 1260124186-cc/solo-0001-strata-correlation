@@ -51,7 +51,11 @@ func currentRevisionDigest(history []geology.Revision, version int) (string, boo
 	if !revisionExists(history, version) {
 		return "", false
 	}
-	return digestValue(history[version-1])
+	digest, err := digestValue(history[version-1])
+	if err != nil {
+		return "", false
+	}
+	return digest, true
 }
 
 // Inspect validates the package independently, then compares its immutable

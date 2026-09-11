@@ -110,15 +110,15 @@ func (h *Handler) inspectUploadedPackage(w http.ResponseWriter, r *http.Request)
 }
 
 type packageSummaryView struct {
-	Format             string             `json:"format"`
-	PackageID          string             `json:"package_id"`
-	Status             string             `json:"status"`
-	Complete           bool               `json:"complete"`
-	Summary            exchange.Summary   `json:"summary"`
-	ContentDigest      string             `json:"content_digest"`
-	Selections         []exchange.Selection `json:"selections"`
-	MissingReferences  []exchange.MissingReference `json:"missing_references"`
-	Manifest           exchange.Manifest  `json:"manifest"`
+	Format            string                      `json:"format"`
+	PackageID         string                      `json:"package_id"`
+	Status            string                      `json:"status"`
+	Complete          bool                        `json:"complete"`
+	Summary           exchange.Summary            `json:"summary"`
+	ContentDigest     string                      `json:"content_digest"`
+	Selections        []exchange.Selection        `json:"selections"`
+	MissingReferences []exchange.MissingReference `json:"missing_references"`
+	Manifest          exchange.Manifest           `json:"manifest"`
 }
 
 func packageView(pkg exchange.Envelope) packageSummaryView {

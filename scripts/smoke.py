@@ -278,7 +278,7 @@ def exchange(s):
     redownloaded = json.loads(s.call('GET', f"/api/v1/exchange-packages/{package['package_id']}/download", raw=True))
     assert redownloaded == downloaded
     inspection = s.call('GET', f"/api/v1/exchange-packages/{package['package_id']}/inspect")
-    statuses = {(m['kind'], m['id'], m['version']): m['service_status'] for m in inspection['members']}
+    statuses = {(m['kind'], m['id'], m.get('version', 0)): m['service_status'] for m in inspection['members']}
     assert statuses[('profile_revision', a['id'], 3)] == 'present'
     assert statuses[('profile_history', a['id'], 0)] == 'changed_in_service'
     assert statuses[('comparison', comparison['id'], 0)] == 'present'

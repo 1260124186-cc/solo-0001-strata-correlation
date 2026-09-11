@@ -51,15 +51,15 @@ type ProfileHistory struct {
 }
 
 type RevisionSummary struct {
-	ProfileID  string       `json:"profile_id"`
-	Version    int          `json:"version"`
+	ProfileID  string        `json:"profile_id"`
+	Version    int           `json:"version"`
 	State      geology.State `json:"state"`
-	Name       string       `json:"name"`
-	Site       string       `json:"site"`
-	DepthMM    int64        `json:"depth_mm"`
-	LayerCount int          `json:"layer_count"`
-	UpdatedAt  time.Time    `json:"updated_at"`
-	Digest     string       `json:"content_digest"`
+	Name       string        `json:"name"`
+	Site       string        `json:"site"`
+	DepthMM    int64         `json:"depth_mm"`
+	LayerCount int           `json:"layer_count"`
+	UpdatedAt  time.Time     `json:"updated_at"`
+	Digest     string        `json:"content_digest"`
 }
 
 type HistorySummary struct {
@@ -94,36 +94,36 @@ type Member struct {
 }
 
 type Manifest struct {
-	Format             string             `json:"format"`
-	Members            []Member           `json:"members"`
-	MissingReferences  []MissingReference `json:"missing_references"`
+	Format            string             `json:"format"`
+	Members           []Member           `json:"members"`
+	MissingReferences []MissingReference `json:"missing_references"`
 }
 
 type Summary struct {
-	HistoryCount            int    `json:"history_count"`
-	RevisionCount           int    `json:"revision_count"`
-	ComparisonCount         int    `json:"comparison_count"`
-	MissingReferenceCount   int    `json:"missing_reference_count"`
-	ContentDigest           string `json:"content_digest"`
+	HistoryCount          int    `json:"history_count"`
+	RevisionCount         int    `json:"revision_count"`
+	ComparisonCount       int    `json:"comparison_count"`
+	MissingReferenceCount int    `json:"missing_reference_count"`
+	ContentDigest         string `json:"content_digest"`
 }
 
 type Payload struct {
-	Format             string             `json:"format"`
-	Selections         []Selection        `json:"selections"`
-	Histories          []ProfileHistory   `json:"histories"`
-	Comparisons        []correlation.Result `json:"comparisons"`
-	MissingReferences  []MissingReference `json:"missing_references"`
+	Format            string               `json:"format"`
+	Selections        []Selection          `json:"selections"`
+	Histories         []ProfileHistory     `json:"histories"`
+	Comparisons       []correlation.Result `json:"comparisons"`
+	MissingReferences []MissingReference   `json:"missing_references"`
 }
 
 type Envelope struct {
-	Format        string  `json:"format"`
-	PackageID     string  `json:"package_id"`
-	SelectionKey  string  `json:"selection_key"`
-	Status        string  `json:"status"`
-	Complete      bool    `json:"complete"`
-	Summary       Summary `json:"summary"`
-	ContentDigest string  `json:"content_digest"`
-	Payload       Payload `json:"payload"`
+	Format        string   `json:"format"`
+	PackageID     string   `json:"package_id"`
+	SelectionKey  string   `json:"selection_key"`
+	Status        string   `json:"status"`
+	Complete      bool     `json:"complete"`
+	Summary       Summary  `json:"summary"`
+	ContentDigest string   `json:"content_digest"`
+	Payload       Payload  `json:"payload"`
 	Manifest      Manifest `json:"manifest"`
 }
 
