@@ -86,7 +86,7 @@ func (s State) Validate() error {
 		}
 	}
 	for id, result := range s.Comparisons {
-		if id != result.ID || id != result.Request.Key() || result.Algorithm != correlation.Algorithm || result.CreatedAt.IsZero() {
+		if id != result.ID || id != result.Request.Key(result.Algorithm) || correlation.ValidateAlgorithm(result.Algorithm) != nil || result.CreatedAt.IsZero() {
 			return fmt.Errorf("invalid comparison identity")
 		}
 		a, err := s.Revision(result.Request.Left.ID, result.Request.Left.Version)
@@ -97,7 +97,7 @@ func (s State) Validate() error {
 		if err != nil {
 			return err
 		}
-		computed, err := correlation.Align(a.Profile, b.Profile, result.Request, result.CreatedAt)
+		computed, err := correlation.Align(a.Profile, b.Profile, result.Request, result.Algorithm, result.CreatedAt)
 		if err != nil {
 			return err
 		}

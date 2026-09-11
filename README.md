@@ -63,9 +63,41 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 将以上对象以 JSON 提交至 `POST /api/v1/comparisons`。右侧深度转换为 `右侧原深度 + offset_mm`，左侧作为共同坐标。算法合并两侧分层边界，并保留每个共同区间的岩性、厚度与 `equal / different / unknown` 关系。
 
-`similarity = equal_mm / known_mm`。未知岩性不计入 `known_mm`；全部共同区间未知时 `similarity` 为 `null`。无共同区间、非锁定输入或同一版本自身对比会被拒绝。两份不同版本可以属于同一剖面。对比结果引用**指定历史版本**，当前剖面重新打开后仍可重用旧结果。
+### 算法版本
+
+对比算法可以逐步演进，结果中永久记录它当时使用的算法版本。当前支持：
+
+| 版本 | 未知岩性处理 |
+| --- | --- |
+| `interval-v1` | 任一区间内任一侧岩性未知即标记 `unknown`，该区间不计入相似度分母；全部共同区间未知时相似度为 `null` |
+| `interval-v2`（当前版本） | 区间切分与 v1 相同；仅双方都未知才标记 `unknown`，单侧未知标记 `different` 并计入相似度分母；仅当全部区间双侧未知时相似度为 `null` |
+
+`POST /comparisons` 省略 `algorithm` 字段时使用当前版本；显式给出 `"algorithm":"interval-v1"` 仍可按旧版本计算。`GET /api/v1/comparison-algorithms` 列出全部版本、说明和当前版本标识。
+
+算法标识参与结果编号推导（编号由算法标识与左右引用、偏移共同哈希得到），因此同一输入在同一版本下复用同一结果，不同版本得到不同编号，可以并存、互不覆盖。哈希载荷自 v1 起未改变，**升级算法不会改变任何已有编号**，旧结果永远能通过原编号访问。已保存结果保留各自的算法标识：详情读取、CSV 导出和启动时的可重复性校验都按结果自带的版本执行，不要求旧结果迁移。
+
+`similarity = equal_mm / known_mm`。未知岩性不计入 `known_mm`；全部共同区间未知时 `similarity` 为 `null`（v2 下指全部区间双侧未知）。无共同区间、非锁定输入或同一版本自身对比会被拒绝。两份不同版本可以属于同一剖面。对比结果引用**指定历史版本**，当前剖面重新打开后仍可重用旧结果。
 
 相同输入和算法版本生成同一编号，首次返回 HTTP 201，重复请求返回 HTTP 200 和原结果。交换左右或修改偏移属于不同输入。`GET /api/v1/comparisons/{id}/csv` 导出固定字段的区间 CSV，字段只包含数值、岩性代码和关系代码。
+
+### 按版本筛选与重算
+
+`GET /api/v1/comparisons?algorithm=interval-v1` 只返回指定算法版本的结果，可与 `profile_id` 组合。
+
+重算会为同一组输入生成目标版本的**新结果**，原结果始终保留。重算前先请求差异预览：
+
+```bash
+curl -sS "http://127.0.0.1:8093/api/v1/comparisons/<id>/algorithm-diff?algorithm=interval-v2"
+```
+
+响应包含两个版本各自的 `overlap_mm / known_mm / equal_mm / similarity`、逐区间 `unknown→different` 的归类变化，以及面向编录人员的 `summary` 文字说明；两版本结论一致时 `identical` 为 `true`。预览不创建任何结果。确认后调用：
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8093/api/v1/comparisons/<id>/recompute" \
+  -H 'Content-Type: application/json' -d '{"algorithm":"interval-v2"}'
+```
+
+省略请求体或 `algorithm` 时重算到当前版本。返回 `source`（原结果）、`result`（新结果，201 并带 Location）和 `diff`（与预览一致）；目标版本结果此前已存在时返回 200 且 `reused` 为 `true`。同版本重算返回 409。
 
 `POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
@@ -90,10 +122,13 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /profiles/{id}/revisions/{version}` | 指定历史版本及事件 |
 | `GET /profiles/{id}/diff` | 必填 `from, to`，查看同一剖面从旧版本到新版本的差异 |
 | `POST /comparison-offsets` | 根据共同标志层建议偏移 |
-| `POST /comparisons` | `left, right, offset_mm`，生成或复用对比 |
-| `GET /comparisons` | 可选 `profile_id, offset, limit` |
-| `GET /comparisons/{id}` | 已保存的完整对比结果 |
-| `GET /comparisons/{id}/csv` | 区间 CSV |
+| `GET /comparison-algorithms` | 算法版本清单与当前版本 |
+| `POST /comparisons` | `left, right, offset_mm, algorithm?`，生成或复用对比 |
+| `GET /comparisons` | 可选 `profile_id, algorithm, offset, limit` |
+| `GET /comparisons/{id}` | 已保存的完整对比结果（按保存时的算法版本读取） |
+| `GET /comparisons/{id}/csv` | 区间 CSV（按保存时的算法版本导出） |
+| `GET /comparisons/{id}/algorithm-diff` | 可选 `algorithm`（默认当前版本），重算前的版本差异预览 |
+| `POST /comparisons/{id}/recompute` | `algorithm?`，生成目标版本新结果并保留原结果 |
 
 上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
 

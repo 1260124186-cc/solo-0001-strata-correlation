@@ -6,7 +6,12 @@ import (
 	"time"
 )
 
-func Align(left, right geology.Profile, request Request, now time.Time) (Result, error) {
+// Align 使用指定算法版本计算对比。区间切分规则对所有版本相同；
+// 版本差异只体现在未知岩性如何归类以及相似度分母上。
+func Align(left, right geology.Profile, request Request, algorithm string, now time.Time) (Result, error) {
+	if err := ValidateAlgorithm(algorithm); err != nil {
+		return Result{}, err
+	}
 	if err := request.Validate(); err != nil {
 		return Result{}, err
 	}
@@ -22,19 +27,32 @@ func Align(left, right geology.Profile, request Request, now time.Time) (Result,
 	if request.Left != (Reference{left.ID, left.Version}) || request.Right != (Reference{right.ID, right.Version}) {
 		return Result{}, geology.Invalid("reference", "历史版本与输入不一致")
 	}
-	result := Result{ID: request.Key(), Algorithm: Algorithm, Request: request, Segments: []Segment{}, Markers: []MarkerPair{}, CreatedAt: now}
+	result := Result{ID: request.Key(algorithm), Algorithm: algorithm, Request: request, Segments: []Segment{}, Markers: []MarkerPair{}, CreatedAt: now}
 	i, j := 0, 0
 	for i < len(left.Layers) && j < len(right.Layers) {
 		a, b := left.Layers[i], right.Layers[j]
 		top := max(a.TopMM, b.TopMM+request.OffsetMM)
 		bottom := min(a.BottomMM, b.BottomMM+request.OffsetMM)
 		if top < bottom {
-			relation := "different"
 			thickness := bottom - top
 			result.OverlapMM += thickness
-			if a.Rock == geology.Unknown || b.Rock == geology.Unknown {
+			leftUnknown := a.Rock == geology.Unknown
+			rightUnknown := b.Rock == geology.Unknown
+			relation := "different"
+			switch {
+			case leftUnknown && rightUnknown:
+				// 两个版本都把双侧未知排除在相似度之外。
 				relation = "unknown"
-			} else {
+			case leftUnknown || rightUnknown:
+				if algorithm == V1 {
+					// v1：任一未知即 unknown，不计入已知长度。
+					relation = "unknown"
+				} else {
+					// v2：仅一侧未知视为可判定的不一致，计入相似度分母。
+					result.KnownMM += thickness
+					relation = "different"
+				}
+			default:
 				result.KnownMM += thickness
 				if a.Rock == b.Rock {
 					relation = "equal"

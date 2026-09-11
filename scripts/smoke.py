@@ -3,6 +3,7 @@
 import argparse
 import concurrent.futures
 import csv
+import hashlib
 import io
 import json
 import os
@@ -199,28 +200,100 @@ def seal(s):
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == current
 
 
+def legacy_cmp_id(body):
+    # 复刻升级前 Go 端的编号推导：sha256(json({Algorithm, Request}))，载荷不出现多余字段。
+    payload = json.dumps({'Algorithm': 'interval-v1', 'Request': body}, separators=(',', ':'),
+                         ensure_ascii=False).encode()
+    return 'cmp_' + hashlib.sha256(payload).hexdigest()[:32]
+
+
 def compare(s):
     a, b = sealed(s, '西侧剖面'), sealed(s, '东侧剖面', 6000)
     request = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
+    # 新发起的对比默认使用当前算法版本。
     result = s.call('POST', '/api/v1/comparisons', request, 201)
+    assert result['algorithm'] == 'interval-v2'
     assert result['overlap_mm'] == 10000 and result['equal_mm'] == 8000 and result['similarity'] == .8
     assert s.call('POST', '/api/v1/comparisons', request) == result
     rows = list(csv.DictReader(io.StringIO(s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv', raw=True))))
     assert len(rows) == 3 and sum(int(r['thickness_mm']) for r in rows) == 10000
+    algorithms = s.call('GET', '/api/v1/comparison-algorithms')
+    assert algorithms['current'] == 'interval-v2'
+    assert {x['algorithm'] for x in algorithms['items']} == {'interval-v1', 'interval-v2'}
     proposal = s.call('POST', '/api/v1/comparison-offsets', dict(left=request['left'], right=request['right']))
     assert proposal['comparison']['offset_mm'] == -2000 and not proposal['ambiguous']
     aligned = s.call('POST', '/api/v1/comparisons', proposal['comparison'], 201)
-    assert aligned['similarity'] == 1 and aligned['overlap_mm'] == 8000
+    assert aligned['algorithm'] == 'interval-v2' and aligned['similarity'] == 1 and aligned['overlap_mm'] == 8000
     s.call('POST', '/api/v1/comparisons', {**request, 'offset_mm': 10000}, 409)
     s.call('POST', '/api/v1/comparisons', {**request, 'left': dict(id=a['id'], version=2)}, 409)
     c = state(s, replace(s, create(s, '待识别岩性'), [dict(top_mm=0, bottom_mm=10000, rock='unknown')]), 'seal')
-    unknown = s.call('POST', '/api/v1/comparisons', {**request, 'right': dict(id=c['id'], version=3)}, 201)
-    assert unknown['known_mm'] == 0 and unknown['similarity'] is None
+
+    # 旧算法版本仍可显式使用；编号推导与升级前逐字节一致，旧编号不会失效。
+    v1_request = {**request, 'algorithm': 'interval-v1'}
+    v1 = s.call('POST', '/api/v1/comparisons', v1_request, 201)
+    assert v1['id'] == legacy_cmp_id(request) and v1['algorithm'] == 'interval-v1'
+    assert s.call('POST', '/api/v1/comparisons', v1_request) == v1
+    # 同一输入在当前版本下与旧版本并存，互不覆盖。
+    v2 = s.call('POST', '/api/v1/comparisons', {**request, 'algorithm': 'interval-v2'}, 200)
+    assert v2['id'] != v1['id'] and s.call('GET', f'/api/v1/comparisons/{v1["id"]}')['algorithm'] == 'interval-v1'
+    s.call('POST', '/api/v1/comparisons', {**request, 'algorithm': 'interval-v9'}, 422)
+
+    # v1 与 v2 的差异只在单侧未知区间：v1 记 unknown 不进分母，v2 记 different 进分母。
+    unknown_v1 = s.call('POST', '/api/v1/comparisons',
+                        {**v1_request, 'right': dict(id=c['id'], version=3)}, 201)
+    assert unknown_v1['known_mm'] == 0 and unknown_v1['similarity'] is None
+    unknown_v2 = s.call('POST', '/api/v1/comparisons',
+                        dict(left=request['left'], right=dict(id=c['id'], version=3), offset_mm=0), 201)
+    assert unknown_v2['known_mm'] == 10000 and unknown_v2['equal_mm'] == 0 and unknown_v2['similarity'] == 0
+    assert {seg['relation'] for seg in unknown_v1['segments']} == {'unknown'}
+    assert {seg['relation'] for seg in unknown_v2['segments']} == {'different'}
+
+    # 按算法版本筛选；未知版本被拒绝。
+    page_v1 = s.call('GET', '/api/v1/comparisons?algorithm=interval-v1')
+    assert page_v1['total'] == 2 and {x['algorithm'] for x in page_v1['items']} == {'interval-v1'}
+    page_v2 = s.call('GET', '/api/v1/comparisons?algorithm=interval-v2')
+    assert page_v2['total'] == 3 and {x['algorithm'] for x in page_v2['items']} == {'interval-v2'}
+    s.call('GET', '/api/v1/comparisons?algorithm=interval-v9', expected=422)
+    assert s.call('GET', f"/api/v1/comparisons?profile_id={a['id']}&algorithm=interval-v1")['total'] == 2
+
+    # 重算前先说明两个版本会得出什么差异；预览不落盘。
+    diff = s.call('GET', f'/api/v1/comparisons/{unknown_v1["id"]}/algorithm-diff?algorithm=interval-v2')
+    assert diff['from_algorithm'] == 'interval-v1' and diff['to_algorithm'] == 'interval-v2'
+    assert not diff['identical'] and diff['to_metrics']['known_mm'] == 10000
+    assert len(diff['changes']) == 2
+    assert {c['from_relation'] for c in diff['changes']} == {'unknown'}
+    assert {c['to_relation'] for c in diff['changes']} == {'different'}
+    assert sum(c['thickness_mm'] for c in diff['changes']) == 10000
+    assert diff['summary']
+    assert s.call('GET', '/api/v1/comparisons?algorithm=interval-v1')['total'] == 2
+    # 对两侧岩性都已知的结果，两版本结论一致。
+    same = s.call('GET', f'/api/v1/comparisons/{v1["id"]}/algorithm-diff?algorithm=interval-v2')
+    assert same['identical'] and same['changes'] == []
+    s.call('GET', f'/api/v1/comparisons/{v1["id"]}/algorithm-diff?algorithm=interval-v1', expected=409)
+
+    # 目标版本尚未保存时，重算生成新结果（201）并保留原结果；偏移 -4000 只有 v1。
+    fresh_v1 = s.call('POST', '/api/v1/comparisons', {**v1_request, 'offset_mm': -4000}, 201)
+    outcome = s.call('POST', f'/api/v1/comparisons/{fresh_v1["id"]}/recompute', dict(algorithm='interval-v2'), 201)
+    assert outcome['source']['id'] == fresh_v1['id'] and not outcome['reused']
+    fresh_v2 = outcome['result']
+    assert fresh_v2['algorithm'] == 'interval-v2' and fresh_v2['id'] != fresh_v1['id']
+    assert s.call('GET', f'/api/v1/comparisons/{fresh_v1["id"]}') == fresh_v1
+    assert s.call('GET', f'/api/v1/comparisons/{fresh_v2["id"]}')['algorithm'] == 'interval-v2'
+    # 目标版本已存在时复用（200），同样保留原结果。
+    reused = s.call('POST', f'/api/v1/comparisons/{unknown_v1["id"]}/recompute', dict(algorithm='interval-v2'), 200)
+    assert reused['reused'] and reused['result']['id'] == unknown_v2['id']
+    assert s.call('GET', f'/api/v1/comparisons/{unknown_v1["id"]}') == unknown_v1
+    s.call('POST', f'/api/v1/comparisons/{unknown_v2["id"]}/recompute', dict(algorithm='interval-v2'), 409)
+
     state(s, a, 'reopen')
     assert s.call('POST', '/api/v1/comparisons', request) == result
     s.stop()
     s.start()
+    # 重启后两个版本的原编号都仍能找到，启动校验按各自算法版本通过。
     assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+    assert s.call('GET', f'/api/v1/comparisons/{v1["id"]}') == v1
+    assert s.call('GET', f'/api/v1/comparisons/{unknown_v1["id"]}') == unknown_v1
+    list(csv.DictReader(io.StringIO(s.call('GET', f'/api/v1/comparisons/{unknown_v1["id"]}/csv', raw=True))))
 
 
 def browse(s):
