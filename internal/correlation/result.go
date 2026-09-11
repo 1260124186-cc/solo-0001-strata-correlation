@@ -46,6 +46,7 @@ type Result struct {
 	KnownMM    int64        `json:"known_mm"`
 	EqualMM    int64        `json:"equal_mm"`
 	Similarity *float64     `json:"similarity"`
+	Supersedes string       `json:"supersedes,omitempty"`
 	CreatedAt  time.Time    `json:"created_at"`
 }
 
@@ -65,14 +66,20 @@ func (r Request) Validate() error {
 	return nil
 }
 
-func (r Request) Key() string {
+// KeyFor derives the result identity from the input and the regenerated
+// lineage. An empty supersedes reproduces the plain request key, so results
+// created before lineage existed keep their identity.
+func KeyFor(r Request, supersedes string) string {
 	b, _ := json.Marshal(struct {
-		Algorithm string
-		Request   Request
-	}{Algorithm, r})
+		Algorithm  string
+		Request    Request
+		Supersedes string `json:",omitempty"`
+	}{Algorithm, r, supersedes})
 	sum := sha256.Sum256(b)
 	return "cmp_" + hex.EncodeToString(sum[:16])
 }
+
+func (r Request) Key() string { return KeyFor(r, "") }
 
 func (r Result) Clone() Result {
 	r.Segments = append([]Segment{}, r.Segments...)

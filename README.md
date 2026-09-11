@@ -67,6 +67,24 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 相同输入和算法版本生成同一编号，首次返回 HTTP 201，重复请求返回 HTTP 200 和原结果。交换左右或修改偏移属于不同输入。`GET /api/v1/comparisons/{id}/csv` 导出固定字段的区间 CSV，字段只包含数值、岩性代码和关系代码。
 
+### 过期与重新生成
+
+对比结果不可变：它始终引用创建时指定的历史版本，剖面之后产生新版本不会改写旧结果，旧结果始终可以读取和导出 CSV。所有返回对比结果的接口附带 `freshness` 对象，按读取时的剖面状态计算，不占用存储：
+
+```json
+"freshness": {
+  "stale": true,
+  "regeneratable": true,
+  "left":  {"referenced_version": 3, "current_version": 6, "latest_sealed_version": 6, "stale": true},
+  "right": {"referenced_version": 3, "current_version": 3, "latest_sealed_version": 3, "stale": false},
+  "superseded_by": ["cmp_..."]
+}
+```
+
+某一侧的引用版本不再是该剖面的当前版本时，该侧及整体的 `stale` 为 `true`；存在更新的锁定版本时 `regeneratable` 为 `true`。`superseded_by` 列出以该结果为来源重新生成的结果编号，没有时省略。
+
+`POST /api/v1/comparisons/{id}/regenerate` 不需要请求体（允许空对象），按原输入的两个剖面和 `offset_mm`，改用各自最新的**锁定**版本生成一条新结果。新结果有独立编号，并携带 `supersedes` 指向来源结果；对同一来源以相同目标重复调用会复用已有结果（HTTP 200）。响应为 `{"result": ..., "diff": ...}`，`diff` 给出新旧结果的版本变化、`overlap_mm / known_mm / equal_mm / similarity` 前后值，以及区间和标志层配对的增加、移除与修改。没有更新的锁定版本、或两侧解析到同一最新锁定版本（同一剖面自对比）时返回 HTTP 409。重新生成不会修改或删除旧结果。
+
 `POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
 ## HTTP 接口
@@ -92,7 +110,8 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `POST /comparison-offsets` | 根据共同标志层建议偏移 |
 | `POST /comparisons` | `left, right, offset_mm`，生成或复用对比 |
 | `GET /comparisons` | 可选 `profile_id, offset, limit` |
-| `GET /comparisons/{id}` | 已保存的完整对比结果 |
+| `GET /comparisons/{id}` | 已保存的完整对比结果及 `freshness` |
+| `POST /comparisons/{id}/regenerate` | 按最新锁定版本重新生成，返回新结果与新旧差异 |
 | `GET /comparisons/{id}/csv` | 区间 CSV |
 
 上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
@@ -120,7 +139,7 @@ STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 
 **测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、对比结果过期与重新生成、新旧差异、CSV、列表筛选与分页。
 
 ## 目录
 

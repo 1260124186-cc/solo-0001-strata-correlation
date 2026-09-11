@@ -12,7 +12,7 @@ func (h *Handler) compare(w http.ResponseWriter, r *http.Request) {
 		h.error(w, r, err)
 		return
 	}
-	result, reused, err := h.service.Compare(r.Context(), input)
+	view, reused, err := h.service.Compare(r.Context(), input)
 	if err != nil {
 		h.error(w, r, err)
 		return
@@ -21,17 +21,38 @@ func (h *Handler) compare(w http.ResponseWriter, r *http.Request) {
 	if reused {
 		status = http.StatusOK
 	}
-	w.Header().Set("Location", "/api/v1/comparisons/"+result.ID)
-	respond(w, status, result)
+	w.Header().Set("Location", "/api/v1/comparisons/"+view.ID)
+	respond(w, status, view)
 }
 
 func (h *Handler) comparison(w http.ResponseWriter, r *http.Request) {
-	result, err := h.service.Comparison(r.Context(), r.PathValue("id"))
+	view, err := h.service.Comparison(r.Context(), r.PathValue("id"))
 	if err != nil {
 		h.error(w, r, err)
 		return
 	}
-	respond(w, http.StatusOK, result)
+	respond(w, http.StatusOK, view)
+}
+
+func (h *Handler) regenerate(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength > 0 {
+		var empty struct{}
+		if err := decode(w, r, &empty); err != nil {
+			h.error(w, r, err)
+			return
+		}
+	}
+	view, diff, reused, err := h.service.Regenerate(r.Context(), r.PathValue("id"))
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	status := http.StatusCreated
+	if reused {
+		status = http.StatusOK
+	}
+	w.Header().Set("Location", "/api/v1/comparisons/"+view.ID)
+	respond(w, status, map[string]any{"result": view, "diff": diff})
 }
 
 func (h *Handler) comparisons(w http.ResponseWriter, r *http.Request) {
@@ -54,18 +75,18 @@ func (h *Handler) comparisons(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) csv(w http.ResponseWriter, r *http.Request) {
-	result, err := h.service.Comparison(r.Context(), r.PathValue("id"))
+	view, err := h.service.Comparison(r.Context(), r.PathValue("id"))
 	if err != nil {
 		h.error(w, r, err)
 		return
 	}
 	var buf bytes.Buffer
-	if err = correlation.WriteCSV(&buf, result); err != nil {
+	if err = correlation.WriteCSV(&buf, view.Result); err != nil {
 		h.error(w, r, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+result.ID+".csv\"")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+view.ID+".csv\"")
 	w.WriteHeader(http.StatusOK)
 	w.Write(buf.Bytes())
 }

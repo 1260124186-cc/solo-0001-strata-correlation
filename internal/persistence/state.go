@@ -86,8 +86,11 @@ func (s State) Validate() error {
 		}
 	}
 	for id, result := range s.Comparisons {
-		if id != result.ID || id != result.Request.Key() || result.Algorithm != correlation.Algorithm || result.CreatedAt.IsZero() {
+		if id != result.ID || id != correlation.KeyFor(result.Request, result.Supersedes) || result.Algorithm != correlation.Algorithm || result.CreatedAt.IsZero() {
 			return fmt.Errorf("invalid comparison identity")
+		}
+		if err := s.validateLineage(result); err != nil {
+			return err
 		}
 		a, err := s.Revision(result.Request.Left.ID, result.Request.Left.Version)
 		if err != nil {
@@ -101,11 +104,38 @@ func (s State) Validate() error {
 		if err != nil {
 			return err
 		}
+		computed.ID = result.ID
+		computed.Supersedes = result.Supersedes
 		expected, _ := json.Marshal(computed)
 		actual, _ := json.Marshal(result)
 		if string(expected) != string(actual) {
 			return fmt.Errorf("comparison data mismatch")
 		}
+	}
+	return nil
+}
+
+// A regenerated result keeps the same profiles and offset as the result it
+// supersedes and advances at least one referenced version. Versions strictly
+// increase along the chain, so lineage cannot form a cycle.
+func (s State) validateLineage(result correlation.Result) error {
+	if result.Supersedes == "" {
+		return nil
+	}
+	base, ok := s.Comparisons[result.Supersedes]
+	if !ok {
+		return fmt.Errorf("superseded comparison %s missing", result.Supersedes)
+	}
+	if result.Supersedes == result.ID {
+		return fmt.Errorf("comparison %s supersedes itself", result.ID)
+	}
+	if base.Request.Left.ID != result.Request.Left.ID || base.Request.Right.ID != result.Request.Right.ID || base.Request.OffsetMM != result.Request.OffsetMM {
+		return fmt.Errorf("comparison %s lineage changed the input", result.ID)
+	}
+	advanced := base.Request.Left.Version < result.Request.Left.Version || base.Request.Right.Version < result.Request.Right.Version
+	regressed := base.Request.Left.Version > result.Request.Left.Version || base.Request.Right.Version > result.Request.Right.Version
+	if !advanced || regressed {
+		return fmt.Errorf("comparison %s lineage must advance versions", result.ID)
 	}
 	return nil
 }

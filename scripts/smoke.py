@@ -204,6 +204,10 @@ def compare(s):
     request = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
     result = s.call('POST', '/api/v1/comparisons', request, 201)
     assert result['overlap_mm'] == 10000 and result['equal_mm'] == 8000 and result['similarity'] == .8
+    freshness = result['freshness']
+    assert freshness['stale'] is False and freshness['regeneratable'] is False
+    assert freshness['left'] == dict(referenced_version=3, current_version=3, latest_sealed_version=3, stale=False)
+    assert 'superseded_by' not in freshness and 'supersedes' not in result
     assert s.call('POST', '/api/v1/comparisons', request) == result
     rows = list(csv.DictReader(io.StringIO(s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv', raw=True))))
     assert len(rows) == 3 and sum(int(r['thickness_mm']) for r in rows) == 10000
@@ -216,11 +220,63 @@ def compare(s):
     c = state(s, replace(s, create(s, '待识别岩性'), [dict(top_mm=0, bottom_mm=10000, rock='unknown')]), 'seal')
     unknown = s.call('POST', '/api/v1/comparisons', {**request, 'right': dict(id=c['id'], version=3)}, 201)
     assert unknown['known_mm'] == 0 and unknown['similarity'] is None
-    state(s, a, 'reopen')
-    assert s.call('POST', '/api/v1/comparisons', request) == result
+    s.call('POST', '/api/v1/comparisons/cmp_' + '0' * 32 + '/regenerate', expected=404)
+    s.call('POST', f'/api/v1/comparisons/{result["id"]}/regenerate', dict(version=3), 422)
+    s.call('POST', f'/api/v1/comparisons/{result["id"]}/regenerate', expected=409)
+    a = state(s, a, 'reopen')
+    stale = s.call('POST', '/api/v1/comparisons', request)
+    assert stale['id'] == result['id'] and stale['segments'] == result['segments']
+    assert stale['freshness']['stale'] is True and stale['freshness']['regeneratable'] is False
+    assert stale['freshness']['left']['current_version'] == 4
+    s.call('POST', f'/api/v1/comparisons/{result["id"]}/regenerate', expected=409)
+    a = state(s, replace(s, a, layers(5000)), 'seal')
+    assert a['version'] == 6
+    expired = s.call('GET', f'/api/v1/comparisons/{result["id"]}')
+    assert expired['freshness']['stale'] is True and expired['freshness']['regeneratable'] is True
+    assert expired['freshness']['left']['latest_sealed_version'] == 6
+    assert expired['segments'] == result['segments'] and expired['similarity'] == .8
+    regenerated = s.call('POST', f'/api/v1/comparisons/{result["id"]}/regenerate', expected=201)
+    new, diff = regenerated['result'], regenerated['diff']
+    assert new['id'] != result['id'] and new['supersedes'] == result['id']
+    assert new['request'] == dict(left=dict(id=a['id'], version=6), right=dict(id=b['id'], version=3), offset_mm=0)
+    assert new['freshness']['stale'] is False and new['equal_mm'] == 9000 and new['similarity'] == .9
+    assert diff['from_id'] == result['id'] and diff['to_id'] == new['id']
+    assert diff['left_version'] == {'from': 3, 'to': 6} and diff['right_version'] == {'from': 3, 'to': 3}
+    assert diff['equal_mm'] == {'from': 8000, 'to': 9000} and diff['overlap_mm'] == {'from': 10000, 'to': 10000}
+    assert diff['similarity'] == {'from': .8, 'to': .9}
+    spans = lambda items: [(x['top_mm'], x['bottom_mm']) for x in items]
+    assert spans(diff['segments']['added']) == [(0, 5000), (5000, 6000)]
+    assert spans(diff['segments']['removed']) == [(0, 4000), (4000, 6000)]
+    assert diff['segments']['changed'] == []
+    assert len(diff['markers']['changed']) == 1
+    marker = diff['markers']['changed'][0]
+    assert marker['before']['left_mm'] == 4000 and marker['after']['left_mm'] == 5000
+    again = s.call('POST', f'/api/v1/comparisons/{result["id"]}/regenerate')
+    assert again['result']['id'] == new['id'] and again['diff']['to_id'] == new['id']
+    superseded = s.call('GET', f'/api/v1/comparisons/{result["id"]}')
+    assert superseded['freshness']['superseded_by'] == [new['id']]
+    assert superseded['similarity'] == .8 and 'supersedes' not in superseded
+    rows = list(csv.DictReader(io.StringIO(s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv', raw=True))))
+    assert len(rows) == 3 and sum(int(r['thickness_mm']) for r in rows) == 10000
+    rows = list(csv.DictReader(io.StringIO(s.call('GET', f'/api/v1/comparisons/{new["id"]}/csv', raw=True))))
+    assert len(rows) == 3 and sum(int(r['thickness_mm']) for r in rows) == 10000
+    page = s.call('GET', f'/api/v1/comparisons?profile_id={a["id"]}')
+    assert page['total'] == 4 and all('freshness' in item for item in page['items'])
+    before_restart_old = s.call('GET', f'/api/v1/comparisons/{result["id"]}')
+    before_restart_new = s.call('GET', f'/api/v1/comparisons/{new["id"]}')
     s.stop()
     s.start()
-    assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+    assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == before_restart_old
+    assert s.call('GET', f'/api/v1/comparisons/{new["id"]}') == before_restart_new
+    b = state(s, b, 'reopen')
+    b = state(s, replace(s, b, layers(6000)), 'seal')
+    self_request = dict(left=dict(id=b['id'], version=3), right=dict(id=b['id'], version=6), offset_mm=0)
+    self_comparison = s.call('POST', '/api/v1/comparisons', self_request, 201)
+    b = state(s, b, 'reopen')
+    b = state(s, replace(s, b, layers(6000)), 'seal')
+    s.call('POST', f'/api/v1/comparisons/{self_comparison["id"]}/regenerate', expected=409)
+    collapsed = s.call('GET', f'/api/v1/comparisons/{self_comparison["id"]}')
+    assert collapsed['freshness']['stale'] is True and collapsed['freshness']['regeneratable'] is False
 
 
 def browse(s):
