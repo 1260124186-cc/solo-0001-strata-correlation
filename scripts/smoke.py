@@ -197,6 +197,40 @@ def seal(s):
     s.stop()
     s.start()
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == current
+    modified = [dict(top_mm=0, bottom_mm=4000, rock='sandstone', description='中粒砂岩', marker=''),
+                dict(top_mm=4000, bottom_mm=7000, rock='mudstone', marker='凝灰标志'),
+                dict(top_mm=7000, bottom_mm=10000, rock='shale', description='黑色页岩', marker='')]
+    p = replace(s, current, modified)
+    plain = s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=5&to=6')
+    assert 'matched' not in plain and len(plain['layers']) == 4
+    paired = [x for x in plain['layers'] if x['before'] and x['after']]
+    assert len(paired) == 1 and paired[0]['after']['description'] == '中粒砂岩'
+    detailed = s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=5&to=6&view=detailed')
+    assert detailed['matched'] == [dict(top_mm=0, bottom_mm=4000,
+                                        changes=[dict(field='description', before='', after='中粒砂岩')])]
+    outline = [(x['top_mm'], x['bottom_mm'], bool(x['before']), bool(x['after'])) for x in detailed['layers']]
+    assert outline == [(4000, 7000, False, True), (4000, 10000, True, False), (7000, 10000, False, True)]
+    backward = s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=6&to=5&view=detailed')
+    assert backward['from_version'] == 6 and backward['to_version'] == 5
+    assert len(backward['matched']) == len(detailed['matched']) == 1
+    assert len(backward['layers']) == len(detailed['layers']) == 3
+    for fore, back in zip(detailed['matched'], backward['matched']):
+        assert (fore['top_mm'], fore['bottom_mm']) == (back['top_mm'], back['bottom_mm'])
+        for cf, cb in zip(fore['changes'], back['changes']):
+            assert cf['field'] == cb['field'] and cf['before'] == cb['after'] and cf['after'] == cb['before']
+    for lf, lb in zip(detailed['layers'], backward['layers']):
+        assert (lf['top_mm'], lf['bottom_mm']) == (lb['top_mm'], lb['bottom_mm'])
+        assert lf['before'] == lb['after'] and lf['after'] == lb['before']
+    forward = s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=3&to=5')
+    reverse = s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=5&to=3')
+    assert reverse['from_version'] == 5 and reverse['to_version'] == 3
+    assert len(forward['fields']) == len(reverse['fields']) > 0
+    for cf, cb in zip(forward['fields'], reverse['fields']):
+        assert cf['field'] == cb['field'] and cf['before'] == cb['after'] and cf['after'] == cb['before']
+    s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=6&to=6', expected=422)
+    s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=5&to=6&view=full', expected=422)
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}')['version'] == 6
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}/history')['total'] == 6
 
 
 def compare(s):

@@ -88,7 +88,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `POST /profiles/{id}/reopen` | `expected_version, reason`，重新打开 |
 | `GET /profiles/{id}/history` | 按版本升序列出事件，支持 `offset, limit` |
 | `GET /profiles/{id}/revisions/{version}` | 指定历史版本及事件 |
-| `GET /profiles/{id}/diff` | 必填 `from, to`，查看同一剖面从旧版本到新版本的差异 |
+| `GET /profiles/{id}/diff` | 必填 `from, to`，可选 `view=detailed`，查看同一剖面两个版本之间的差异 |
 | `POST /comparison-offsets` | 根据共同标志层建议偏移 |
 | `POST /comparisons` | `left, right, offset_mm`，生成或复用对比 |
 | `GET /comparisons` | 可选 `profile_id, offset, limit` |
@@ -99,7 +99,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 单个剖面最多 500 层、500 个历史版本，总深度最大 1000000 毫米。最多 2000 个剖面、10000 个对比结果，总快照上限 64 MiB。岩性支持 `sandstone / mudstone / limestone / shale / conglomerate / unknown`。名称最多 120 字、地点 200 字、说明 2000 字，单层描述 1000 字，标志层名称 80 字，修订理由 1–500 字。标志层名称在同一剖面内忽略大小写后必须唯一。
 
-差异接口按完整深度区间匹配分层；边界变化展示为原区间移除和新区间增加，相同区间中的岩性或描述修改展示前后值。深度查询使用左闭右开区间，边界点属于其下方分层，剖面底端不属于任何层。
+差异接口按完整深度区间匹配分层；边界变化展示为原区间移除和新区间增加，相同区间中的岩性或描述修改展示前后值。追加 `view=detailed` 时，深度区间完全相同的层对展开为 `matched` 中的字段级变化（`rock`、`description`、`marker` 的前值与后值），真正新增、删除或边界移动的层仍留在 `layers` 中按区间变化表达；不带 `view` 的默认响应结构保持不变。`from` 和 `to` 可以是任意顺序的两个不同版本：反向查看时同一处改动的前后值随视角互换，两个方向结论一致。差异只是对已保存版本的只读计算，不产生新版本，也不修改快照。深度查询使用左闭右开区间，边界点属于其下方分层，剖面底端不属于任何层。
 
 ## 持久化与恢复
 

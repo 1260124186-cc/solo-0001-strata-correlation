@@ -49,7 +49,7 @@ func (h *Handler) suggest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) difference(w http.ResponseWriter, r *http.Request) {
-	q, err := query(r.URL.RawQuery, "from", "to")
+	q, err := query(r.URL.RawQuery, "from", "to", "view")
 	if err != nil {
 		h.error(w, r, err)
 		return
@@ -68,10 +68,23 @@ func (h *Handler) difference(w http.ResponseWriter, r *http.Request) {
 		h.error(w, r, err)
 		return
 	}
-	result, err := h.service.Difference(r.Context(), r.PathValue("id"), from, to)
-	if err != nil {
-		h.error(w, r, err)
-		return
+	id := r.PathValue("id")
+	switch q.Get("view") {
+	case "":
+		result, err := h.service.Difference(r.Context(), id, from, to)
+		if err != nil {
+			h.error(w, r, err)
+			return
+		}
+		respond(w, http.StatusOK, result)
+	case "detailed":
+		result, err := h.service.DetailedDifference(r.Context(), id, from, to)
+		if err != nil {
+			h.error(w, r, err)
+			return
+		}
+		respond(w, http.StatusOK, result)
+	default:
+		h.error(w, r, geology.Invalid("view", "差异视图只支持 detailed"))
 	}
-	respond(w, http.StatusOK, result)
 }

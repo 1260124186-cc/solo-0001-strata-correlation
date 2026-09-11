@@ -52,19 +52,36 @@ func (s *Service) SuggestOffset(ctx context.Context, input correlation.OffsetReq
 	return proposal, err
 }
 
-func (s *Service) Difference(ctx context.Context, id string, from, to int) (geology.Difference, error) {
-	var result geology.Difference
+// revisionPair 只读取出两个已保存版本，不产生新版本也不修改快照。
+func (s *Service) revisionPair(ctx context.Context, id string, from, to int) (geology.Profile, geology.Profile, error) {
+	var a, b geology.Profile
 	err := s.repo.View(ctx, func(state persistence.State) error {
-		a, err := state.Revision(id, from)
+		first, err := state.Revision(id, from)
 		if err != nil {
 			return err
 		}
-		b, err := state.Revision(id, to)
+		second, err := state.Revision(id, to)
 		if err != nil {
 			return err
 		}
-		result, err = geology.DifferenceOf(a.Profile, b.Profile)
-		return err
+		a, b = first.Profile, second.Profile
+		return nil
 	})
-	return result, err
+	return a, b, err
+}
+
+func (s *Service) Difference(ctx context.Context, id string, from, to int) (geology.Difference, error) {
+	a, b, err := s.revisionPair(ctx, id, from, to)
+	if err != nil {
+		return geology.Difference{}, err
+	}
+	return geology.DifferenceOf(a, b)
+}
+
+func (s *Service) DetailedDifference(ctx context.Context, id string, from, to int) (geology.DetailedDifference, error) {
+	a, b, err := s.revisionPair(ctx, id, from, to)
+	if err != nil {
+		return geology.DetailedDifference{}, err
+	}
+	return geology.DetailedDifferenceOf(a, b)
 }
