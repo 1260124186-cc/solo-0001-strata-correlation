@@ -8,10 +8,17 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-const maxSnapshot = 64 << 20
+const (
+	maxSnapshot = 64 << 20
+	maxShard    = 64 << 20
+	tempPrefix  = ".strata-"
+)
 
+// envelope is the legacy whole-snapshot container, kept readable so existing
+// data directories migrate without an export/import step.
 type envelope struct {
 	Digest string          `json:"digest"`
 	Data   json.RawMessage `json:"data"`
@@ -37,9 +44,8 @@ func readSnapshot(path string) (State, error) {
 	if err = json.Unmarshal(raw, &env); err != nil {
 		return State{}, fmt.Errorf("invalid snapshot: %w", err)
 	}
-	sum := sha256.Sum256(env.Data)
-	if env.Digest != hex.EncodeToString(sum[:]) {
-		return State{}, fmt.Errorf("snapshot checksum mismatch")
+	if err = verifyDigest(env.Digest, env.Data); err != nil {
+		return State{}, err
 	}
 	var state State
 	if err = json.Unmarshal(env.Data, &state); err != nil {
@@ -51,23 +57,33 @@ func readSnapshot(path string) (State, error) {
 	return state, nil
 }
 
-// A rename is the commit point. After it, callers must use the new state even
-// when syncing the directory reports an error.
-func writeSnapshot(path string, state State) (committed bool, err error) {
-	raw, err := json.Marshal(state)
+func verifyDigest(digest string, data []byte) error {
+	if digest != digestOf(data) {
+		return fmt.Errorf("snapshot checksum mismatch")
+	}
+	return nil
+}
+
+func digestOf(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
 	if err != nil {
-		return false, err
+		return err
 	}
-	sum := sha256.Sum256(raw)
-	contents, err := json.Marshal(envelope{hex.EncodeToString(sum[:]), raw})
-	if err != nil {
-		return false, err
-	}
-	if len(contents) > maxSnapshot {
-		return false, fmt.Errorf("snapshot capacity of 64 MiB reached")
-	}
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, ".strata-*")
+	defer d.Close()
+	return d.Sync()
+}
+
+// writeFileAtomic stages contents in a private temporary file, fsyncs it and
+// atomically renames it over name. The rename is the commit point: callers
+// must treat the new contents as durable after committed == true even when
+// the subsequent directory fsync reports an error.
+func writeFileAtomic(dir, name string, contents []byte) (committed bool, err error) {
+	f, err := os.CreateTemp(dir, tempPrefix+"*")
 	if err != nil {
 		return false, err
 	}
@@ -90,13 +106,27 @@ func writeSnapshot(path string, state State) (committed bool, err error) {
 	if closeErr != nil {
 		return false, closeErr
 	}
-	if err = os.Rename(temporary, path); err != nil {
+	if err = os.Rename(temporary, filepath.Join(dir, name)); err != nil {
 		return false, err
 	}
-	d, err := os.Open(dir)
+	return true, syncDir(dir)
+}
+
+// sweepTempFiles removes leftovers of interrupted atomic writes. Only regular
+// files carrying the temporary prefix are touched; anything else is left in
+// place so that unexpected directory contents surface as a startup error.
+func sweepTempFiles(dir string) error {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return true, err
+		return err
 	}
-	defer d.Close()
-	return true, d.Sync()
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), tempPrefix) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return syncDir(dir)
 }

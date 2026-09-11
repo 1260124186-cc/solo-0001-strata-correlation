@@ -152,16 +152,21 @@ def record(s):
     s.start()
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == p
     s.stop()
-    snapshot = s.directory / 'data' / 'strata.json'
-    original = snapshot.read_bytes()
+    shard_dir = s.directory / 'data' / 'shards'
+    shard_files = sorted(shard_dir.glob('*.json'))
+    assert shard_files and not (s.directory / 'data' / 'strata.json').exists()
+    shard = shard_dir / f'{p["id"]}.json'
+    original = shard.read_bytes()
     damaged = json.loads(original)
     damaged['digest'] = '0' * 64
-    snapshot.write_text(json.dumps(damaged))
+    shard.write_text(json.dumps(damaged))
     attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(s.directory/'data')], capture_output=True, timeout=10)
     assert attempt.returncode != 0 and b'checksum mismatch' in attempt.stderr
-    snapshot.write_bytes(original)
+    shard.write_bytes(original)
     s.start()
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == p
+    leftover = list(shard_dir.glob('.strata-*'))
+    assert not leftover, leftover
 
 
 def seal(s):
@@ -243,11 +248,63 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def legacy_snapshot(directory):
+    """Write a pre-sharding whole snapshot and return the expected profile."""
+    data_dir = directory / 'data'
+    data_dir.mkdir(parents=True, exist_ok=True)
+    ts = '2026-09-11T00:00:00Z'
+    profile = dict(
+        id='prf_' + 'ab' * 16,
+        name='旧快照剖面', site='赤石岭', note='迁移前数据', depth_mm=10000,
+        layers=[
+            dict(top_mm=0, bottom_mm=4000, rock='sandstone', description='', marker=''),
+            dict(top_mm=4000, bottom_mm=10000, rock='mudstone', description='', marker='凝灰标志'),
+        ],
+        state='sealed', version=3, created_at=ts, updated_at=ts,
+    )
+    def event(action, version):
+        return dict(action=action, reason='历史记录', version=version, at=ts)
+    v1 = dict(profile, layers=[], state='draft', version=1)
+    v2 = dict(profile, state='draft', version=2)
+    payload = dict(schema=1, histories={profile['id']: [
+        dict(profile=v1, event=event('create', 1)),
+        dict(profile=v2, event=event('layers', 2)),
+        dict(profile=profile, event=event('seal', 3)),
+    ]}, comparisons={})
+    raw = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode()
+    import hashlib
+    # Keep the data bytes identical to the bytes the digest was taken over;
+    # embedding them as a raw JSON fragment avoids any re-serialization drift.
+    envelope = ('{"digest":"' + hashlib.sha256(raw).hexdigest() + '","data":' +
+                raw.decode() + '}')
+    (data_dir / 'strata.json').write_text(envelope)
+    return profile
+
+
+def migrate(s):
+    # s was booted on an empty directory; stop it and replace the store with a
+    # legacy whole snapshot before the next start triggers migration.
+    s.stop()
+    expected = legacy_snapshot(s.directory)
+    snapshot = s.directory / 'data' / 'strata.json'
+    assert snapshot.exists()
+    s.start()
+    assert not snapshot.exists(), 'legacy snapshot must be removed after migration'
+    shards = sorted((s.directory / 'data' / 'shards').glob('*.json'))
+    assert [p.name for p in shards] == [expected['id'] + '.json']
+    assert s.call('GET', f'/api/v1/profiles/{expected["id"]}') == expected
+    locked = s.call('GET', f'/api/v1/profiles/{expected["id"]}/revisions/3')
+    assert locked['profile'] == expected
+    s.stop()
+    s.start()
+    assert s.call('GET', f'/api/v1/profiles/{expected["id"]}') == expected
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'migrate', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'migrate'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)
