@@ -34,6 +34,15 @@ func New(service *catalog.Service, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /api/v1/comparisons", h.comparisons)
 	mux.HandleFunc("GET /api/v1/comparisons/{id}", h.comparison)
 	mux.HandleFunc("GET /api/v1/comparisons/{id}/csv", h.csv)
+	mux.HandleFunc("POST /api/v1/lines", h.createLine)
+	mux.HandleFunc("GET /api/v1/lines", h.listLines)
+	mux.HandleFunc("GET /api/v1/lines/{id}", h.getLine)
+	mux.HandleFunc("GET /api/v1/lines/{id}/stations/{profile}/adjacent", h.adjacent)
+	mux.HandleFunc("PUT /api/v1/lines/{id}", h.editLineMeta)
+	mux.HandleFunc("PUT /api/v1/lines/{id}/stations", h.replaceLineStations)
+	mux.HandleFunc("POST /api/v1/lines/{id}/reorder", h.reorderLine)
+	mux.HandleFunc("POST /api/v1/lines/{id}/finalize", h.finalizeLine)
+	mux.HandleFunc("POST /api/v1/lines/{id}/fork", h.forkLine)
 	return middleware(mux, logger)
 }
 

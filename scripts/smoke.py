@@ -243,11 +243,142 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def line(s):
+    # 三个已锁定剖面作为测线位置；A、C 刻意放在同一距离制造并列。
+    a = sealed(s, '测线甲剖面')
+    b = sealed(s, '测线乙剖面')
+    c = sealed(s, '测线丙剖面')
+    draft_d = create(s, '未锁定剖面')
+
+    def station(p, chainage, version=3):
+        return dict(profile_id=p['id'], version=version, chainage_mm=chainage)
+
+    # 草稿可以为空；绑定非锁定版本、缺失版本、同位置重复都要被明确拒绝。
+    empty = s.call('POST', '/api/v1/lines', dict(name='赤石测线', note='沿山脚', stations=[]), 201)
+    assert empty['state'] == 'draft' and empty['stations'] == [] and empty['revision'] == 1
+    s.call('POST', '/api/v1/lines', dict(name='坏引用', stations=[station(draft_d, 0, version=1)]), 409)
+    s.call('POST', '/api/v1/lines',
+           dict(name='缺版本', stations=[dict(profile_id=a['id'], version=99, chainage_mm=0)]), 422)
+    s.call('POST', '/api/v1/lines',
+           dict(name='重复位置', stations=[station(a, 0), station(a, 100)]), 409)
+    s.call('POST', '/api/v1/lines', dict(name=''), 422)
+    s.call('POST', '/api/v1/lines', dict(name='多余字段', stations=[], extra=True), 422)
+
+    # 同距离允许并列（不同剖面）；默认并列先后按 profile_id，且必须稳定。
+    body = dict(name='赤石主测线', stations=[station(a, 5000), station(c, 5000), station(b, 12000)])
+    ln = s.call('POST', '/api/v1/lines', body, 201)
+    lid = ln['id']
+    ids = [st['profile_id'] for st in ln['stations']]
+    assert ids == sorted([a['id'], c['id']]) + [b['id']], ids
+    tied = [st for st in ln['stations'] if st['chainage_mm'] == 5000]
+    assert [st['order'] for st in tied] == [1, 2]
+    assert [st['tie_group_index'] for st in tied] == [1, 2]
+    assert all(st['tie_group_size'] == 2 and st['tied'] for st in tied)
+    assert ln['stations'][2]['tied'] is False and ln['stations'][2]['tie_group_size'] == 1
+    assert ln['revision'] == 1
+
+    # 稳定性不依赖内部存储顺序：调整输入顺序重存，读回的相邻顺序必须一致。
+    shuffled = dict(name='赤石主测线', stations=[station(b, 12000), station(c, 5000), station(a, 5000)])
+    s.call('PUT', f'/api/v1/lines/{lid}/stations',
+           dict(expected_revision=1, reason='换序录入', stations=shuffled['stations']), 200)
+    again = s.call('GET', f'/api/v1/lines/{lid}')
+    assert [st['profile_id'] for st in again['stations']] == ids
+    assert again['revision'] == 2
+
+    # 显式调整同距离并列先后：只能在距离单调不减的前提下重排。
+    swapped = [c['id'], a['id'], b['id']]
+    s.call('POST', f'/api/v1/lines/{lid}/reorder',
+           dict(expected_revision=2, reason='现场确认甲在前', order=swapped), 200)
+    reordered = s.call('GET', f'/api/v1/lines/{lid}')
+    assert [st['profile_id'] for st in reordered['stations']] == swapped
+    first_two = reordered['stations'][:2]
+    assert [st['tie_group_index'] for st in first_two] == [1, 2]
+    assert reordered['revision'] == 3
+    # 想借排序制造距离倒退必须被拒绝；缺漏、多余、未知编号也拒绝。
+    s.call('POST', f'/api/v1/lines/{lid}/reorder',
+           dict(expected_revision=3, order=[b['id'], a['id'], c['id']]), 409)
+    s.call('POST', f'/api/v1/lines/{lid}/reorder',
+           dict(expected_revision=3, order=[a['id'], c['id']]), 422)
+    s.call('POST', f'/api/v1/lines/{lid}/reorder',
+           dict(expected_revision=3, order=[a['id'], a['id'], c['id'], b['id']]), 422)
+    # 乐观修订号：过期写入得到 409，状态不变。
+    s.call('PUT', f'/api/v1/lines/{lid}/stations',
+           dict(expected_revision=1, stations=shuffled['stations']), 409)
+
+    # 定稿冻结：定稿后任何写操作都被拒绝，仍可按当时内容查询。
+    final = s.call('POST', f'/api/v1/lines/{lid}/finalize',
+                   dict(expected_revision=3, reason='现场测线定稿'), 200)
+    assert final['state'] == 'finalized' and final['revision'] == 4 and final['finalized_at']
+    frozen_order = [st['profile_id'] for st in final['stations']]
+    frozen_versions = {st['profile_id']: st['version'] for st in final['stations']}
+    s.call('PUT', f'/api/v1/lines/{lid}', dict(expected_revision=4, name='改名'), 409)
+    s.call('POST', f'/api/v1/lines/{lid}/reorder',
+           dict(expected_revision=4, order=swapped), 409)
+    s.call('POST', f'/api/v1/lines/{lid}/finalize', dict(expected_revision=4, reason='x'), 409)
+    # 不足两个位置不能定稿。
+    s.call('POST', f'/api/v1/lines/{empty["id"]}/finalize',
+           dict(expected_revision=1, reason='空线定稿'), 409)
+
+    # 成员剖面产生新版本 / 重新打开：定稿引用不被替换，只提示 outdated。
+    a = state(s, a, 'reopen')
+    a = replace(s, a, layers(), expected=200)
+    a = state(s, a, 'seal')
+    view = s.call('GET', f'/api/v1/lines/{lid}')
+    by_id = {st['profile_id']: st for st in view['stations']}
+    assert by_id[a['id']]['version'] == frozen_versions[a['id']]
+    assert by_id[a['id']]['outdated'] is True
+    assert by_id[a['id']]['current_version'] == a['version']
+    assert by_id[b['id']]['outdated'] is False
+    assert [st['profile_id'] for st in view['stations']] == frozen_order
+
+    # 需要新版本：显式 fork 出新草稿，旧定稿保持原样可查。
+    fork = s.call('POST', f'/api/v1/lines/{lid}/fork', dict(name='赤石主测线-修订'), 201)
+    assert fork['state'] == 'draft' and fork['source_id'] == lid and fork['revision'] == 1
+    # fork 默认原样复制旧引用（不自动升级），用户再显式把甲位置换到新版本。
+    fid = fork['id']
+    new_stations = [
+        dict(profile_id=c['id'], version=3, chainage_mm=5000),
+        dict(profile_id=a['id'], version=a['version'], chainage_mm=5000),
+        dict(profile_id=b['id'], version=3, chainage_mm=12000),
+    ]
+    s.call('PUT', f'/api/v1/lines/{fid}/stations',
+           dict(expected_revision=1, reason='采用甲剖面新版本', stations=new_stations), 200)
+    fork2 = s.call('POST', f'/api/v1/lines/{fid}/finalize',
+                   dict(expected_revision=2, reason='新版定稿'), 200)
+    fmap = {st['profile_id']: st['version'] for st in fork2['stations']}
+    assert fmap[a['id']] == a['version']
+    # 旧定稿仍按当时冻结内容查询。
+    old = s.call('GET', f'/api/v1/lines/{lid}')
+    assert old['state'] == 'finalized'
+    assert {st['profile_id']: st['version'] for st in old['stations']} == frozen_versions
+    assert [st['profile_id'] for st in old['stations']] == frozen_order
+
+    # 列表筛选、分页与定稿/草稿计数。
+    finals = s.call('GET', '/api/v1/lines?state=finalized')
+    assert finals['total'] == 2
+    drafts = s.call('GET', '/api/v1/lines?state=draft')
+    assert drafts['total'] == 1 and drafts['items'][0]['id'] == empty['id']
+    found = s.call('GET', '/api/v1/lines?q='+urllib.parse.quote('赤石主测线'))
+    assert found['total'] >= 2
+    for bad in ['state=absent', 'limit=0', 'extra=1', 'limit=1&limit=2']:
+        s.call('GET', '/api/v1/lines?'+bad, expected=422)
+    s.call('GET', '/api/v1/lines/line_'+'0'*32, expected=404)
+
+    # 重启恢复：定稿顺序与冻结版本保持不变，且不依赖 map 存储顺序。
+    s.stop()
+    s.start()
+    recovered = s.call('GET', f'/api/v1/lines/{lid}')
+    assert recovered['state'] == 'finalized'
+    assert [st['profile_id'] for st in recovered['stations']] == frozen_order
+    assert {st['profile_id']: st['version'] for st in recovered['stations']} == frozen_versions
+    assert recovered == old
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'line', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'line'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

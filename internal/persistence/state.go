@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/line"
 	"reflect"
 )
 
@@ -12,10 +13,16 @@ type State struct {
 	Schema      int                           `json:"schema"`
 	Histories   map[string][]geology.Revision `json:"histories"`
 	Comparisons map[string]correlation.Result `json:"comparisons"`
+	Lines       map[string]line.Line          `json:"lines"`
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{
+		Schema:      1,
+		Histories:   map[string][]geology.Revision{},
+		Comparisons: map[string]correlation.Result{},
+		Lines:       map[string]line.Line{},
+	}
 }
 
 func (s State) Clone() State {
@@ -30,7 +37,23 @@ func (s State) Clone() State {
 	for id, result := range s.Comparisons {
 		out.Comparisons[id] = result.Clone()
 	}
+	for id, l := range s.Lines {
+		out.Lines[id] = l.Clone()
+	}
 	return out
+}
+
+// normalize 兼容缺少 lines 字段的旧快照，恢复后统一保证 map 非空。
+func (s *State) normalize() {
+	if s.Histories == nil {
+		s.Histories = map[string][]geology.Revision{}
+	}
+	if s.Comparisons == nil {
+		s.Comparisons = map[string]correlation.Result{}
+	}
+	if s.Lines == nil {
+		s.Lines = map[string]line.Line{}
+	}
 }
 
 func (s State) Latest(id string) (geology.Profile, error) {
@@ -53,7 +76,8 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 }
 
 func (s State) Validate() error {
-	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
+	s.normalize()
+	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil || s.Lines == nil {
 		return fmt.Errorf("unsupported snapshot shape")
 	}
 	for id, history := range s.Histories {
@@ -105,6 +129,24 @@ func (s State) Validate() error {
 		actual, _ := json.Marshal(result)
 		if string(expected) != string(actual) {
 			return fmt.Errorf("comparison data mismatch")
+		}
+	}
+	for id, l := range s.Lines {
+		if id != l.ID {
+			return fmt.Errorf("line identity mismatch %s", id)
+		}
+		if err := l.Validate(); err != nil {
+			return fmt.Errorf("invalid line %s: %w", id, err)
+		}
+		// 测线引用的锁定版本必须真实存在且当时已锁定；定稿后这些引用被冻结。
+		for _, st := range l.Stations {
+			revision, err := s.Revision(st.ProfileID, st.Version)
+			if err != nil {
+				return fmt.Errorf("line %s references missing revision: %w", id, err)
+			}
+			if revision.Profile.State != geology.Sealed {
+				return fmt.Errorf("line %s references unsealed revision", id)
+			}
 		}
 	}
 	return nil

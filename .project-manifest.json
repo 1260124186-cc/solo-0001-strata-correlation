@@ -24,6 +24,11 @@
       "responsibility": "depth and state rules"
     },
     {
+      "id": "line",
+      "path": "internal/line",
+      "responsibility": "survey line ordering and ties"
+    },
+    {
       "id": "correlation",
       "path": "internal/correlation",
       "responsibility": "interval alignment"
@@ -121,6 +126,26 @@
         "api",
         "catalog",
         "geology",
+        "persistence"
+      ]
+    },
+    {
+      "id": "line",
+      "name": "测线",
+      "entry": "POST /api/v1/lines",
+      "steps": [
+        "bind sealed revisions at chainage",
+        "reorder tied stations",
+        "finalize and freeze references",
+        "flag updates and fork new draft"
+      ],
+      "success": "finalized line order and versions remain queryable",
+      "failure": "duplicate, missing or unsealed reference rejected",
+      "verification": "bounded HTTP workflow smoke check",
+      "module_ids": [
+        "api",
+        "catalog",
+        "line",
         "persistence"
       ]
     }
