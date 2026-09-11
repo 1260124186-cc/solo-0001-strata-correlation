@@ -46,7 +46,9 @@ type report struct {
 
 func main() {
 	code, reportValue := run(os.Args[1:])
-	emit(reportValue)
+	if reportValue.Verdict != "" {
+		emit(reportValue)
+	}
 	os.Exit(code)
 }
 
@@ -142,7 +144,9 @@ func readJSON[T any](path string) (T, error) {
 	return value, nil
 }
 
+// emit prints exactly one JSON object on a single line, as documented for
+// recipients parsing the conclusion automatically.
 func emit(value report) {
-	raw, _ := json.MarshalIndent(value, "", "  ")
+	raw, _ := json.Marshal(value)
 	fmt.Println(string(raw))
 }

@@ -298,7 +298,12 @@ def attest(s):
         if now:
             args += ['-now', now]
         proc = subprocess.run(args, capture_output=True, text=True, timeout=15)
-        result = json.loads(proc.stdout)
+        # Output shape contract: exactly one non-empty line carrying one JSON
+        # object with a verdict, so recipients can parse it line-oriented.
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        assert len(lines) == 1, f'verifier must print one JSON line, got: {proc.stdout!r}'
+        result = json.loads(lines[0])
+        assert set(['verdict', 'reason']).issubset(result), result
         return proc.returncode, result
 
     code, result = run_verifier()
