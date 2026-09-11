@@ -32,6 +32,28 @@ func (h *Handler) reopen(w http.ResponseWriter, r *http.Request) {
 	h.change(w, r, geology.Draft)
 }
 
+func (h *Handler) adopt(w http.ResponseWriter, r *http.Request) {
+	var input catalog.AdoptHistory
+	if err := decode(w, r, &input); err != nil {
+		h.error(w, r, err)
+		return
+	}
+	if input.ExpectedVersion < 1 {
+		h.error(w, r, geology.Invalid("expected_version", "必须为正整数"))
+		return
+	}
+	if input.SourceVersion < 1 {
+		h.error(w, r, geology.Invalid("source_version", "必须为正整数"))
+		return
+	}
+	p, err := h.service.Adopt(r.Context(), r.PathValue("id"), input)
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	profileResponse(w, http.StatusOK, p)
+}
+
 func (h *Handler) revision(w http.ResponseWriter, r *http.Request) {
 	version, err := integer(r.PathValue("version"), "version", 0, 1, 500)
 	if err != nil {

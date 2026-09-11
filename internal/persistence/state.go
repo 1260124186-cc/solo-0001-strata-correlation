@@ -74,12 +74,15 @@ func (s State) Validate() error {
 				if r.Event.Action != "create" || r.Profile.State != geology.Draft {
 					return fmt.Errorf("invalid initial revision")
 				}
+				if r.Event.SourceVersion != 0 {
+					return fmt.Errorf("initial revision cannot adopt history")
+				}
 			} else {
 				before := history[i-1].Profile
 				if !before.CreatedAt.Equal(r.Profile.CreatedAt) || r.Profile.UpdatedAt.Before(before.UpdatedAt) {
 					return fmt.Errorf("invalid revision chronology")
 				}
-				if err := validateStep(before, r); err != nil {
+				if err := validateStep(history, i, r); err != nil {
 					return err
 				}
 			}
@@ -110,26 +113,45 @@ func (s State) Validate() error {
 	return nil
 }
 
-func validateStep(before geology.Profile, r geology.Revision) error {
+func validateStep(history []geology.Revision, index int, r geology.Revision) error {
+	before := history[index-1].Profile
 	after := r.Profile
 	switch r.Event.Action {
-	case "metadata", "layers":
+	case "metadata", "layers", "seal", "reopen":
+		if r.Event.SourceVersion != 0 {
+			return fmt.Errorf("%s revision cannot name a source version", r.Event.Action)
+		}
+		switch r.Event.Action {
+		case "metadata", "layers":
+			if before.State != geology.Draft || after.State != geology.Draft {
+				return fmt.Errorf("edited sealed revision")
+			}
+			if r.Event.Action == "layers" && before.Metadata != after.Metadata {
+				return fmt.Errorf("layers edit changed metadata")
+			}
+			if r.Event.Action == "metadata" && !reflect.DeepEqual(before.Layers, after.Layers) {
+				return fmt.Errorf("metadata edit changed layers")
+			}
+		case "seal", "reopen":
+			expected := geology.Sealed
+			if r.Event.Action == "reopen" {
+				expected = geology.Draft
+			}
+			if after.State != expected || before.State == expected || before.Metadata != after.Metadata || !reflect.DeepEqual(before.Layers, after.Layers) {
+				return fmt.Errorf("invalid state change")
+			}
+		}
+	case "adopt":
 		if before.State != geology.Draft || after.State != geology.Draft {
-			return fmt.Errorf("edited sealed revision")
+			return fmt.Errorf("adopted outside of draft revision")
 		}
-		if r.Event.Action == "layers" && before.Metadata != after.Metadata {
-			return fmt.Errorf("layers edit changed metadata")
+		sourceVersion := r.Event.SourceVersion
+		if sourceVersion < 1 || sourceVersion >= after.Version || sourceVersion > len(history) {
+			return fmt.Errorf("adopt references unknown source revision")
 		}
-		if r.Event.Action == "metadata" && !reflect.DeepEqual(before.Layers, after.Layers) {
-			return fmt.Errorf("metadata edit changed layers")
-		}
-	case "seal", "reopen":
-		expected := geology.Sealed
-		if r.Event.Action == "reopen" {
-			expected = geology.Draft
-		}
-		if after.State != expected || before.State == expected || before.Metadata != after.Metadata || !reflect.DeepEqual(before.Layers, after.Layers) {
-			return fmt.Errorf("invalid state change")
+		source := history[sourceVersion-1].Profile
+		if source.Version != sourceVersion || after.Metadata != source.Metadata || !reflect.DeepEqual(after.Layers, source.Layers) {
+			return fmt.Errorf("adopt content does not match source revision")
 		}
 	default:
 		return fmt.Errorf("unknown revision action")

@@ -51,6 +51,16 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 锁定成功返回版本 3。修改必须携带当前 `expected_version`；相同版本的并发请求只有一个成功，其余得到 HTTP 409。`ETag` 仅描述响应版本，写入以 JSON 中的 `expected_version` 为准。已锁定剖面需要通过 `/reopen` 重新打开，新版本不会改变历史记录。
 
+重新打开后若想直接沿用某个旧版本，而不必手工照抄元数据和分层，可以采用历史内容：
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/adopt" \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version":4,"source_version":3,"reason":"采用 v3 锁定内容继续编录"}'
+```
+
+该操作整体复制 `source_version` 的元数据和分层，生成下一个**草拟**版本；既不回退也不删除任何历史版本，来源版本仍然可读并可继续用于对比。要求：当前为草拟状态（锁定版本必须先 `/reopen`），`expected_version` 等于当前版本，`source_version` 属于同一剖面且是当前版本之前的历史版本。来源可以是锁定版本，也可以是带深度缺口的草拟版本，缺口会一并带入新版本。历史事件记录为 `adopt`，并带 `source_version` 字段说明内容来自哪一个版本。采用得到的草稿可像普通草稿一样继续编录和锁定；覆盖统计与按深度查询直接反映采用后的真实内容。
+
 ## 对比两个锁定版本
 
 ```json
@@ -86,6 +96,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /profiles/{id}/at` | 必填 `depth_mm`，可选 `version`；返回所属层或缺口 |
 | `POST /profiles/{id}/seal` | `expected_version, reason`，锁定当前版本 |
 | `POST /profiles/{id}/reopen` | `expected_version, reason`，重新打开 |
+| `POST /profiles/{id}/adopt` | `expected_version, source_version, reason`，采用历史版本内容生成新草拟版本 |
 | `GET /profiles/{id}/history` | 按版本升序列出事件，支持 `offset, limit` |
 | `GET /profiles/{id}/revisions/{version}` | 指定历史版本及事件 |
 | `GET /profiles/{id}/diff` | 必填 `from, to`，查看同一剖面从旧版本到新版本的差异 |
@@ -120,7 +131,7 @@ STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 
 **测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、历史内容采用、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
 
 ## 目录
 
