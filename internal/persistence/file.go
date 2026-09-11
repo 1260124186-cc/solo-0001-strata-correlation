@@ -45,6 +45,7 @@ func readSnapshot(path string) (State, error) {
 	if err = json.Unmarshal(env.Data, &state); err != nil {
 		return State{}, err
 	}
+	migrateComparisons(&state)
 	if err = state.Validate(); err != nil {
 		return State{}, fmt.Errorf("snapshot validation: %w", err)
 	}

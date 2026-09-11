@@ -18,6 +18,26 @@ func emptyState() State {
 	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
 }
 
+// migrateComparisons upgrades results saved by older builds in place so that
+// legacy snapshots keep starting with their original conclusions. Results
+// written before the exclude-marker work omit the excluded_markers and
+// missing_markers arrays; re-aligning with the current code always emits both
+// arrays, which would make the byte-for-byte validation reject them even
+// though their conclusions (identity, offset, segments, marker evidence) are
+// unchanged. New writes always persist both arrays non-nil, so nil is a
+// reliable legacy marker. Filling the arrays never alters any stored figure.
+func migrateComparisons(state *State) {
+	for id, result := range state.Comparisons {
+		if result.ExcludedMarkers == nil {
+			result.ExcludedMarkers = []correlation.MarkerPair{}
+		}
+		if result.MissingMarkers == nil {
+			result.MissingMarkers = []string{}
+		}
+		state.Comparisons[id] = result
+	}
+}
+
 func (s State) Clone() State {
 	out := emptyState()
 	for id, revisions := range s.Histories {

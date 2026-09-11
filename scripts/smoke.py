@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import selectors
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -18,14 +19,19 @@ import urllib.request
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def build_binary(directory, source=ROOT):
+    args = ['go', 'build']
+    if os.environ.get('STRATA_SMOKE_RACE') == '1':
+        args.append('-race')
+    subprocess.run(args + ['-o', str(Path(directory) / 'stratad'), './cmd/stratad'],
+                   cwd=source, check=True, timeout=120)
+
+
 class Server:
-    def __init__(self, directory):
+    def __init__(self, directory, source=ROOT):
         self.directory = Path(directory)
         self.binary = self.directory / 'stratad'
-        args = ['go', 'build']
-        if os.environ.get('STRATA_SMOKE_RACE') == '1':
-            args.append('-race')
-        subprocess.run(args + ['-o', str(self.binary), './cmd/stratad'], cwd=ROOT, check=True, timeout=60)
+        build_binary(self.directory, source)
         self.process = None
         self.log = open(self.directory / 'server.log', 'w+')
         try:
@@ -296,13 +302,85 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def upgrade(directory):
+    """Read a snapshot produced by the pre-upgrade build with the new binary.
+
+    The pre-exclude-marker baseline (cf54fe1) writes comparison results
+    without excluded_markers/missing_markers. The new server must start on
+    that data, keep the original conclusions, and continue serving requests.
+    """
+    directory = Path(directory)
+    baseline = 'cf54fe1'
+    worktree = directory / 'oldsrc'
+    if subprocess.run(['git', '-C', str(ROOT), 'cat-file', '-e', baseline+'^{commit}'],
+                      capture_output=True).returncode != 0:
+        print('upgrade: skipped (baseline commit not available)')
+        return
+    subprocess.run(['git', '-C', str(ROOT), 'worktree', 'add', '--detach', str(worktree), baseline],
+                   check=True, capture_output=True, timeout=60)
+    legacy_dir = directory / 'legacy'
+    legacy_dir.mkdir()
+    newdata = directory / 'newdata'
+    try:
+        old = Server(legacy_dir, source=worktree)
+        try:
+            a, b = sealed(old, '西侧剖面'), sealed(old, '东侧剖面', 6000)
+            req = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
+            legacy = old.call('POST', '/api/v1/comparisons', req, 201)
+            assert legacy['overlap_mm'] == 10000 and legacy['similarity'] == .8
+            aligned_req = old.call('POST', '/api/v1/comparison-offsets',
+                                   dict(left=req['left'], right=req['right']))['comparison']
+            legacy_aligned = old.call('POST', '/api/v1/comparisons', aligned_req, 201)
+            assert legacy_aligned['similarity'] == 1 and legacy_aligned['overlap_mm'] == 8000
+        finally:
+            old.close()
+        snapshot = legacy_dir / 'data' / 'strata.json'
+        on_disk = json.loads(snapshot.read_text())['data']
+        for result in on_disk['comparisons'].values():
+            assert 'excluded_markers' not in result and 'missing_markers' not in result
+            assert 'exclude_markers' not in result['request']
+
+        shutil.copytree(legacy_dir / 'data', newdata / 'data')
+        current = Server(newdata)
+        try:
+            # 旧结论原样可读，结果编号不变。
+            fetched = current.call('GET', f'/api/v1/comparisons/{legacy["id"]}')
+            for key in ('id', 'algorithm', 'segments', 'markers', 'overlap_mm', 'known_mm',
+                        'equal_mm', 'similarity', 'request'):
+                assert fetched[key] == legacy[key], key
+            assert fetched['excluded_markers'] == [] and fetched['missing_markers'] == []
+            aligned = current.call('GET', f'/api/v1/comparisons/{legacy_aligned["id"]}')
+            assert aligned['similarity'] == 1 and aligned['overlap_mm'] == 8000
+            # 同一输入仍复用旧结果，而不是另建。
+            assert current.call('POST', '/api/v1/comparisons', req)['id'] == legacy['id']
+            assert current.call('POST', '/api/v1/comparisons', aligned_req)['id'] == legacy_aligned['id']
+            # 新能力在迁移后的快照上照常工作。
+            current.call('POST', '/api/v1/comparison-offsets',
+                         dict(left=req['left'], right=req['right'], exclude_markers=['凝灰标志']), 409)
+            # 触发一次写入，迁移结果以新格式持久化；重启后结论不变。
+            create(current, '升级后新建剖面')
+            current.stop()
+            current.start()
+            assert current.call('GET', f'/api/v1/comparisons/{legacy["id"]}')['similarity'] == .8
+        finally:
+            current.close()
+    finally:
+        subprocess.run(['git', '-C', str(ROOT), 'worktree', 'remove', '--force', str(worktree)],
+                       capture_output=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'upgrade', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = (['record', 'seal', 'compare', 'browse'] if args.workflow == 'all'
+             else [args.workflow])
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
+            if name == 'upgrade':
+                upgrade(directory)
+                print('upgrade: legacy snapshot workflow passed')
+                continue
             server = Server(directory)
             try:
                 globals()[name](server)
