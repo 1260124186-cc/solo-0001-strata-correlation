@@ -19,29 +19,47 @@ type Repository struct {
 }
 
 func Open(dir string) (*Repository, error) {
-	absolute, err := filepath.Abs(dir)
+	absolute, lock, err := acquireDirLock(dir)
 	if err != nil {
 		return nil, err
-	}
-	if err = os.MkdirAll(absolute, 0700); err != nil {
-		return nil, err
-	}
-	lock, err := os.OpenFile(filepath.Join(absolute, "strata.lock"), os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return nil, err
-	}
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		lock.Close()
-		return nil, fmt.Errorf("data directory is already in use: %w", err)
 	}
 	path := filepath.Join(absolute, "strata.json")
 	state, err := readSnapshot(path)
 	if err != nil {
-		syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-		lock.Close()
+		releaseDirLock(lock)
 		return nil, err
 	}
 	return &Repository{state: state, path: path, lock: lock}, nil
+}
+
+// acquireDirLock creates the data directory when needed and takes the same
+// exclusive, non-blocking lock used by normal startup. Diagnostic mode reuses
+// it so a data directory can never be opened by two processes at once.
+func acquireDirLock(dir string) (string, *os.File, error) {
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return "", nil, err
+	}
+	if err = os.MkdirAll(absolute, 0700); err != nil {
+		return "", nil, err
+	}
+	lock, err := os.OpenFile(filepath.Join(absolute, "strata.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return "", nil, err
+	}
+	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close()
+		return "", nil, fmt.Errorf("data directory is already in use: %w", err)
+	}
+	return absolute, lock, nil
+}
+
+func releaseDirLock(lock *os.File) {
+	if lock == nil {
+		return
+	}
+	syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	lock.Close()
 }
 
 func (r *Repository) View(ctx context.Context, fn func(State) error) error {

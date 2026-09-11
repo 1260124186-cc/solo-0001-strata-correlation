@@ -17,38 +17,79 @@ type envelope struct {
 	Data   json.RawMessage `json:"data"`
 }
 
-func readSnapshot(path string) (State, error) {
+// snapshotLoad describes every phase readSnapshot executes. Stages use the
+// same checks and error texts as normal startup so the diagnostic report can
+// never diverge from the Open decision.
+type snapshotLoad struct {
+	present    bool
+	size       int64
+	stage      string
+	state      State
+	checksumOK bool
+	err        error
+}
+
+const (
+	stageRead       = "read"
+	stageCapacity   = "capacity"
+	stageEnvelope   = "envelope"
+	stageChecksum   = "checksum"
+	stageDecode     = "decode"
+	stageValidation = "validation"
+)
+
+func loadSnapshot(path string) snapshotLoad {
 	f, err := os.Open(path)
 	if os.IsNotExist(err) {
-		return emptyState(), nil
+		return snapshotLoad{state: emptyState(), checksumOK: true}
 	}
+	load := snapshotLoad{present: true}
 	if err != nil {
-		return State{}, err
+		load.stage, load.err = stageRead, err
+		return load
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		load.stage, load.err = stageRead, err
+		return load
+	}
+	load.size = info.Size()
 	raw, err := io.ReadAll(io.LimitReader(f, maxSnapshot+1))
 	if err != nil {
-		return State{}, err
+		load.stage, load.err = stageRead, err
+		return load
 	}
 	if len(raw) > maxSnapshot {
-		return State{}, fmt.Errorf("snapshot exceeds 64 MiB")
+		load.stage, load.err = stageCapacity, fmt.Errorf("snapshot exceeds 64 MiB")
+		return load
 	}
 	var env envelope
 	if err = json.Unmarshal(raw, &env); err != nil {
-		return State{}, fmt.Errorf("invalid snapshot: %w", err)
+		load.stage, load.err = stageEnvelope, fmt.Errorf("invalid snapshot: %w", err)
+		return load
 	}
 	sum := sha256.Sum256(env.Data)
 	if env.Digest != hex.EncodeToString(sum[:]) {
-		return State{}, fmt.Errorf("snapshot checksum mismatch")
+		load.checksumOK = false
+		load.stage, load.err = stageChecksum, fmt.Errorf("snapshot checksum mismatch")
+		return load
 	}
-	var state State
-	if err = json.Unmarshal(env.Data, &state); err != nil {
-		return State{}, err
+	load.checksumOK = true
+	if err = json.Unmarshal(env.Data, &load.state); err != nil {
+		load.stage, load.err = stageDecode, err
+		return load
 	}
-	if err = state.Validate(); err != nil {
-		return State{}, fmt.Errorf("snapshot validation: %w", err)
+	if err = load.state.Validate(); err != nil {
+		load.stage, load.err = stageValidation, fmt.Errorf("snapshot validation: %w", err)
+		return load
 	}
-	return state, nil
+	return load
+}
+
+func readSnapshot(path string) (State, error) {
+	load := loadSnapshot(path)
+	return load.state, load.err
 }
 
 // A rename is the commit point. After it, callers must use the new state even

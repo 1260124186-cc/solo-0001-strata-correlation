@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,14 +19,54 @@ import (
 	"time"
 )
 
-func run() error {
+// errDiagnosedUnstartable 表示诊断成功执行但结论为不可启动。
+var errDiagnosedUnstartable = errors.New("snapshot diagnosed as unstartable")
+
+func run() int {
 	c, err := config.Parse(os.Args[1:], os.Stderr)
 	if errors.Is(err, flag.ErrHelp) {
-		return nil
+		return 0
 	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if c.Diagnostic {
+		if err := runDiagnostic(c); err != nil {
+			if errors.Is(err, errDiagnosedUnstartable) {
+				return 1
+			}
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		return 0
+	}
+	if err := serve(c); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	return 0
+}
+
+// runDiagnostic 执行只读诊断：获取同一把数据目录锁、复用正常启动的
+// 读取与校验步骤，输出一份结构化 JSON 报告，然后立即释放锁退出。
+func runDiagnostic(c config.Config) error {
+	report, err := persistence.Diagnose(c.DataDir)
 	if err != nil {
 		return err
 	}
+	encoded, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(encoded))
+	if !report.Startable {
+		return errDiagnosedUnstartable
+	}
+	return nil
+}
+
+func serve(c config.Config) error {
 	repo, err := persistence.Open(c.DataDir)
 	if err != nil {
 		return err
@@ -73,8 +114,5 @@ func run() error {
 }
 
 func main() {
-	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
+	os.Exit(run())
 }

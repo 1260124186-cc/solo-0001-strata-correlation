@@ -3,6 +3,7 @@
 import argparse
 import concurrent.futures
 import csv
+import hashlib
 import io
 import json
 import os
@@ -81,6 +82,15 @@ class Server:
             self.log.close()
             if 'DATA RACE' in content:
                 raise RuntimeError('race detector found a race')
+
+    def diag(self, expected=0):
+        """Run the read-only diagnostic mode and parse its JSON report."""
+        result = subprocess.run(
+            [str(self.binary), '-diag', '-data', str(self.directory / 'data')],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == expected, (result.returncode, result.stderr)
+        return json.loads(result.stdout), result
 
     def call(self, method, path, body=None, expected=200, raw=False):
         data = None if body is None else json.dumps(body, ensure_ascii=False).encode()
@@ -243,11 +253,96 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def diagnose(s):
+    # 空目录：判定可启动且不创建任何快照文件。
+    s.stop()
+    report, _ = s.diag()
+    data_dir = s.directory / 'data'
+    assert report['startable'] is True and report['snapshot']['present'] is False
+    assert all(area['status'] == 'pass' for area in report['areas'])
+    assert not (data_dir / 'strata.json').exists()
+    s.start()
+
+    a, b = sealed(s, '西侧诊断剖面'), sealed(s, '东侧诊断剖面', 6000)
+    request = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
+    comparison = s.call('POST', '/api/v1/comparisons', request, 201)
+
+    # 健康数据：诊断通过，随后正常启动不得因同一问题失败。
+    s.stop()
+    report, _ = s.diag()
+    assert report['startable'] is True
+    assert report['snapshot']['digest_ok'] is True
+    assert report['counts'] == {'profiles': 2, 'revisions': 6, 'comparisons': 1}
+    assert all(area['status'] == 'pass' for area in report['areas'])
+    assert report['recoverability']['auto_recoverable'] is True
+    leaked = json.dumps(report, ensure_ascii=False)
+    for secret in ('西侧诊断剖面', '东侧诊断剖面', '凝灰标志'):
+        assert secret not in leaked
+
+    # 遗留临时文件只产生告警，不影响可启动结论，且不被自动清理。
+    leftover = data_dir / '.strata-smoke-leftover'
+    leftover.write_text('partial')
+    report, _ = s.diag()
+    assert report['startable'] is True and report['leftover_temp_files'] == 1
+    recovery = next(a for a in report['areas'] if a['name'] == 'recoverability')
+    assert recovery['status'] == 'warn'
+    assert leftover.exists()
+    leftover.unlink()
+
+    snapshot = data_dir / 'strata.json'
+    original = snapshot.read_bytes()
+
+    # 校验值损坏：诊断判为不可启动、结构化报告指出校验区域，正常启动同样拒绝。
+    damaged = json.loads(original)
+    damaged['digest'] = '0' * 64
+    snapshot.write_text(json.dumps(damaged, ensure_ascii=False))
+    report, _ = s.diag(expected=1)
+    assert report['startable'] is False
+    checksum = next(a for a in report['areas'] if a['name'] == 'snapshot_checksum')
+    assert [f['code'] for f in checksum['findings']] == ['snapshot_checksum_mismatch']
+    chain = next(a for a in report['areas'] if a['name'] == 'version_chain')
+    references = next(a for a in report['areas'] if a['name'] == 'comparison_references')
+    assert chain['status'] == 'blocked' and references['status'] == 'blocked'
+    assert report['recoverability']['auto_recoverable'] is False
+    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(data_dir)],
+                             capture_output=True, timeout=10)
+    assert attempt.returncode != 0 and b'checksum mismatch' in attempt.stderr
+
+    # 校验值有效但版本链语义损坏：定位到具体剖面版本，结论仍与正常启动一致。
+    envelope = json.loads(original)
+    profile_id = a['id']
+    envelope['data']['histories'][profile_id][1]['event']['action'] = 'bogus'
+    raw = json.dumps(envelope['data'], ensure_ascii=False, separators=(',', ':'))
+    digest = hashlib.sha256(raw.encode()).hexdigest()
+    snapshot.write_text('{"digest":' + json.dumps(digest) + ',"data":' + raw + '}')
+    report, _ = s.diag(expected=1)
+    assert report['startable'] is False and report['snapshot']['digest_ok'] is True
+    chain = next(a for a in report['areas'] if a['name'] == 'version_chain')
+    assert chain['status'] == 'fail' and chain['findings'][0]['code'] == 'step_unknown_action'
+    assert chain['findings'][0]['location'] == f'{profile_id}#v2'
+    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(data_dir)],
+                             capture_output=True, timeout=10)
+    assert attempt.returncode != 0 and b'unknown revision action' in attempt.stderr
+
+    # 恢复后诊断通过，正常启动也必须成功。
+    snapshot.write_bytes(original)
+    report, _ = s.diag()
+    assert report['startable'] is True
+    s.start()
+    assert s.call('GET', f'/api/v1/comparisons/{comparison["id"]}') == comparison
+
+    # 运行中的服务持锁，诊断不能并发打开同一数据目录。
+    attempt = subprocess.run([str(s.binary), '-diag', '-data', str(data_dir)],
+                             capture_output=True, text=True, timeout=10)
+    assert attempt.returncode != 0 and 'already in use' in attempt.stderr
+    assert attempt.stdout == ''
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'diagnose', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'diagnose'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)
