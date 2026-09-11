@@ -1,9 +1,11 @@
 package api
 
 import (
+	"bytes"
+	"net/http"
+
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
-	"net/http"
 )
 
 func (h *Handler) point(w http.ResponseWriter, r *http.Request) {
@@ -32,6 +34,65 @@ func (h *Handler) point(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, http.StatusOK, result)
+}
+
+func (h *Handler) parseRange(r *http.Request) (int, int64, int64, error) {
+	q, err := query(r.URL.RawQuery, "from_mm", "to_mm", "version")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if q.Get("from_mm") == "" || q.Get("to_mm") == "" {
+		return 0, 0, 0, geology.Invalid("range", "必须提供非空 from_mm 和 to_mm")
+	}
+	from, err := integer64(q.Get("from_mm"), "from_mm", 0, geology.MaxDepth)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	to, err := integer64(q.Get("to_mm"), "to_mm", 1, geology.MaxDepth)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	version, err := integer(q.Get("version"), "version", 0, 1, 500)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return version, from, to, nil
+}
+
+func (h *Handler) rangeQuery(w http.ResponseWriter, r *http.Request) {
+	version, from, to, err := h.parseRange(r)
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	result, err := h.service.Range(r.Context(), r.PathValue("id"), version, from, to)
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	respond(w, http.StatusOK, result)
+}
+
+func (h *Handler) rangeCSV(w http.ResponseWriter, r *http.Request) {
+	version, from, to, err := h.parseRange(r)
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	result, err := h.service.Range(r.Context(), r.PathValue("id"), version, from, to)
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	var buf bytes.Buffer
+	if err = geology.WriteRangeCSV(&buf, result); err != nil {
+		h.error(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+result.ProfileID+"-range.csv\"")
+	w.WriteHeader(http.StatusOK)
+	w.Write(buf.Bytes())
 }
 
 func (h *Handler) suggest(w http.ResponseWriter, r *http.Request) {

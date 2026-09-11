@@ -37,6 +37,14 @@ func integer(value, field string, fallback, minValue, maxValue int) (int, error)
 	return n, nil
 }
 
+func integer64(value, field string, minValue, maxValue int64) (int64, error) {
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n < minValue || n > maxValue {
+		return 0, geology.Invalid(field, "整数参数超出允许范围")
+	}
+	return n, nil
+}
+
 func pagination(values url.Values) (offset, limit int, err error) {
 	offset, err = integer(values.Get("offset"), "offset", 0, 0, 1000000)
 	if err != nil {

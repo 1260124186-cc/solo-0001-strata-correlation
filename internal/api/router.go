@@ -24,6 +24,8 @@ func New(service *catalog.Service, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("PUT /api/v1/profiles/{id}/layers", h.replace)
 	mux.HandleFunc("GET /api/v1/profiles/{id}/coverage", h.coverage)
 	mux.HandleFunc("GET /api/v1/profiles/{id}/at", h.point)
+	mux.HandleFunc("GET /api/v1/profiles/{id}/range", h.rangeQuery)
+	mux.HandleFunc("GET /api/v1/profiles/{id}/range/csv", h.rangeCSV)
 	mux.HandleFunc("GET /api/v1/profiles/{id}/diff", h.difference)
 	mux.HandleFunc("POST /api/v1/comparison-offsets", h.suggest)
 	mux.HandleFunc("POST /api/v1/profiles/{id}/seal", h.seal)

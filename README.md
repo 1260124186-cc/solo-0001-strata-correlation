@@ -41,9 +41,13 @@ curl -sS -X PUT "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/layers" \
 
 分层整体替换成功后版本变为 2。输入按顶部深度排序；重叠、非正厚度和越界一律拒绝。空数组可清空草拟剖面，遗漏数组或传入 `null` 会被拒绝。草拟状态允许深度缺口，锁定前必须完整覆盖 `[0, depth_mm)`。
 
+范围查询使用 `from_mm`（含）和 `to_mm`（不含），二者必须位于 `[0, depth_mm]` 且区间非空；越界或空区间返回 422，服务不会静默截断。返回项按深度升序覆盖请求区间，`kind` 为 `layer` 或 `gap`；`top_mm / bottom_mm` 是与请求区间相交后的导出边界，`source_top_mm / source_bottom_mm` 始终保留原始分层或缺口边界。JSON 和 `/range/csv` 共用同一范围结果，CSV 固定输出剖面、版本、类型、相交边界、厚度、原始边界、岩性、标志层和描述，可直接批量导出；调用方不应再自行切分区间。
+
 ```bash
 curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/coverage"
 curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/at?depth_mm=4000"
+curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/range?from_mm=3000&to_mm=6000"
+curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/range/csv?from_mm=3000&to_mm=6000"
 curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
   -H 'Content-Type: application/json' \
   -d '{"expected_version":2,"reason":"分层已核对"}'
@@ -84,6 +88,8 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `PUT /profiles/{id}/layers` | `expected_version, reason, layers` 整体替换分层 |
 | `GET /profiles/{id}/coverage` | 缺口、各岩性厚度和能否锁定 |
 | `GET /profiles/{id}/at` | 必填 `depth_mm`，可选 `version`；返回所属层或缺口 |
+| `GET /profiles/{id}/range` | 必填 `from_mm, to_mm`，可选 `version`；返回连续区间中的层和缺口 |
+| `GET /profiles/{id}/range/csv` | 使用相同范围参数，直接导出区间 CSV |
 | `POST /profiles/{id}/seal` | `expected_version, reason`，锁定当前版本 |
 | `POST /profiles/{id}/reopen` | `expected_version, reason`，重新打开 |
 | `GET /profiles/{id}/history` | 按版本升序列出事件，支持 `offset, limit` |
@@ -99,7 +105,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 单个剖面最多 500 层、500 个历史版本，总深度最大 1000000 毫米。最多 2000 个剖面、10000 个对比结果，总快照上限 64 MiB。岩性支持 `sandstone / mudstone / limestone / shale / conglomerate / unknown`。名称最多 120 字、地点 200 字、说明 2000 字，单层描述 1000 字，标志层名称 80 字，修订理由 1–500 字。标志层名称在同一剖面内忽略大小写后必须唯一。
 
-差异接口按完整深度区间匹配分层；边界变化展示为原区间移除和新区间增加，相同区间中的岩性或描述修改展示前后值。深度查询使用左闭右开区间，边界点属于其下方分层，剖面底端不属于任何层。
+差异接口按完整深度区间匹配分层；边界变化展示为原区间移除和新区间增加，相同区间中的岩性或描述修改展示前后值。深度查询和范围查询统一使用左闭右开区间，边界点属于其下方分层，剖面底端不属于任何层；单点与范围在同一深度必须得到相同归属。
 
 ## 持久化与恢复
 
@@ -120,7 +126,7 @@ STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 
 **测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、连续区间和缺口导出、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
 
 ## 目录
 
@@ -128,7 +134,7 @@ STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 cmd/stratad/          启动、信号和 HTTP 服务生命周期
 internal/api/        JSON、路由、查询参数和请求记录
 internal/catalog/    编录、修订、查阅和对比工作流
-internal/geology/    分层规则、覆盖、深度查询和版本差异
+internal/geology/    分层规则、覆盖、单点与连续区间深度查询和版本差异
 internal/correlation/区间对比、标志层偏移与 CSV
 internal/persistence/快照校验、原子替换、独占锁
 internal/config/     环境变量与启动参数

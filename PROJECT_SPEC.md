@@ -12,7 +12,7 @@
 2. 锁定与修订：检查连续性、锁定版本、读取历史、重新打开并修订。锁定失败保留原状态。
 3. 对比：选定两个已经锁定的历史版本，指定右侧深度偏移，按双方边界切分共同区间，计算岩性相同长度和比例，保存不可变结果。相同输入复用同一结果。
 对比辅助接口 POST /api/v1/comparison-offsets 使用共同标志层所需偏移的中位数提供建议，并输出残差，用户显式采纳后才生成结果。
-4. 查阅：按岩性、地点、名称和状态筛选剖面，分页读取历史事件与分层；读取对比结果的 JSON 或 CSV。GET /profiles/{id}/at 可查询当前或历史版本中的某一深度；GET /profiles/{id}/diff 按区间和元数据字段展示历史差异。
+4. 查阅：按岩性、地点、名称和状态筛选剖面，分页读取历史事件与分层；读取对比结果的 JSON 或 CSV。GET /profiles/{id}/at 可查询当前或历史版本中的某一深度；GET /profiles/{id}/range 及 /range/csv 是连续区间复核和导出的唯一切分入口；GET /profiles/{id}/diff 按区间和元数据字段展示历史差异。
 
 ## 模块与接口
 cmd/stratad 提供启动入口。internal/api 处理 HTTP；internal/catalog 编排剖面工作流；internal/geology 实现深度、状态和验证；internal/correlation 计算共同区间；internal/persistence 负责快照、锁和数据恢复；internal/config 解析环境变量和启动参数。完整接口见 README。

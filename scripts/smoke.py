@@ -130,6 +130,9 @@ def record(s):
     assert coverage['gaps'] == [dict(top_mm=0, bottom_mm=1000), dict(top_mm=9000, bottom_mm=10000)]
     point = s.call('GET', f'/api/v1/profiles/{p["id"]}/at?depth_mm=500')
     assert point['layer'] is None and point['gap']['bottom_mm'] == 1000
+    gapped_range = s.call('GET', f'/api/v1/profiles/{p["id"]}/range?from_mm=500&to_mm=9500')
+    assert [(item['kind'], item['top_mm'], item['bottom_mm']) for item in gapped_range['items']] == [
+        ('gap', 500, 1000), ('layer', 1000, 9000), ('gap', 9000, 9500)]
     bad = [dict(top_mm=0, bottom_mm=6000, rock='shale'), dict(top_mm=5000, bottom_mm=10000, rock='mudstone')]
     replace(s, p, bad, 422)
     current = s.call('GET', f'/api/v1/profiles/{p["id"]}')
@@ -139,6 +142,17 @@ def record(s):
     assert p['layers'][0]['top_mm'] == 0
     point = s.call('GET', f'/api/v1/profiles/{p["id"]}/at?depth_mm=4000')
     assert point['layer']['rock'] == 'mudstone' and point['distance_from_top_mm'] == 0
+    range_result = s.call('GET', f'/api/v1/profiles/{p["id"]}/range?from_mm=500&to_mm=9500')
+    assert [(item['kind'], item['top_mm'], item['bottom_mm'], item['source_top_mm'], item['source_bottom_mm']) for item in range_result['items']] == [
+        ('layer', 500, 4000, 0, 4000), ('layer', 4000, 9500, 4000, 10000)]
+    range_rows = list(csv.DictReader(io.StringIO(s.call(
+        'GET', f'/api/v1/profiles/{p["id"]}/range/csv?from_mm=500&to_mm=9500', raw=True))))
+    assert len(range_rows) == 2 and range_rows[1]['rock'] == 'mudstone'
+    boundary = s.call('GET', f'/api/v1/profiles/{p["id"]}/range?from_mm=4000&to_mm=4001')
+    assert boundary['items'][0]['kind'] == 'layer' and boundary['items'][0]['layer']['rock'] == 'mudstone'
+    s.call('GET', f'/api/v1/profiles/{p["id"]}/range?from_mm=4000&to_mm=4000', expected=422)
+    s.call('GET', f'/api/v1/profiles/{p["id"]}/range?from_mm=6000&to_mm=4000', expected=422)
+    s.call('GET', f'/api/v1/profiles/{p["id"]}/range?from_mm=0&to_mm=10001', expected=422)
     s.call('GET', f'/api/v1/profiles/{p["id"]}/at?depth_mm=10000', expected=422)
     body = dict(expected_version=p['version'], metadata=dict(name=p['name'], site=p['site'], depth_mm=3000), reason='调整深度')
     s.call('PUT', f'/api/v1/profiles/{p["id"]}', body, 422)

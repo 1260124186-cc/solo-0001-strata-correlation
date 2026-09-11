@@ -7,12 +7,11 @@ import (
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/persistence"
 )
 
-func (s *Service) Point(ctx context.Context, id string, version int, depth int64) (geology.Point, error) {
+func (s *Service) inspectProfile(ctx context.Context, id string, version int, view func(geology.Profile) error) error {
 	if version < 0 {
-		return geology.Point{}, geology.Invalid("version", "版本不能为负数")
+		return geology.Invalid("version", "版本不能为负数")
 	}
-	var result geology.Point
-	err := s.repo.View(ctx, func(state persistence.State) error {
+	return s.repo.View(ctx, func(state persistence.State) error {
 		var p geology.Profile
 		var err error
 		if version == 0 {
@@ -25,7 +24,25 @@ func (s *Service) Point(ctx context.Context, id string, version int, depth int64
 		if err != nil {
 			return err
 		}
+		return view(p)
+	})
+}
+
+func (s *Service) Point(ctx context.Context, id string, version int, depth int64) (geology.Point, error) {
+	var result geology.Point
+	err := s.inspectProfile(ctx, id, version, func(p geology.Profile) error {
+		var err error
 		result, err = geology.AtDepth(p, depth)
+		return err
+	})
+	return result, err
+}
+
+func (s *Service) Range(ctx context.Context, id string, version int, from, to int64) (geology.RangeResult, error) {
+	var result geology.RangeResult
+	err := s.inspectProfile(ctx, id, version, func(p geology.Profile) error {
+		var err error
+		result, err = geology.RangeOf(p, from, to)
 		return err
 	})
 	return result, err
