@@ -37,16 +37,17 @@ type MarkerPair struct {
 }
 
 type Result struct {
-	ID         string       `json:"id"`
-	Algorithm  string       `json:"algorithm"`
-	Request    Request      `json:"request"`
-	Segments   []Segment    `json:"segments"`
-	Markers    []MarkerPair `json:"markers"`
-	OverlapMM  int64        `json:"overlap_mm"`
-	KnownMM    int64        `json:"known_mm"`
-	EqualMM    int64        `json:"equal_mm"`
-	Similarity *float64     `json:"similarity"`
-	CreatedAt  time.Time    `json:"created_at"`
+	ID          string       `json:"id"`
+	Algorithm   string       `json:"algorithm"`
+	Fingerprint string       `json:"fingerprint"`
+	Request     Request      `json:"request"`
+	Segments    []Segment    `json:"segments"`
+	Markers     []MarkerPair `json:"markers"`
+	OverlapMM   int64        `json:"overlap_mm"`
+	KnownMM     int64        `json:"known_mm"`
+	EqualMM     int64        `json:"equal_mm"`
+	Similarity  *float64     `json:"similarity"`
+	CreatedAt   time.Time    `json:"created_at"`
 }
 
 func (r Request) Validate() error {
@@ -72,6 +73,34 @@ func (r Request) Key() string {
 	}{Algorithm, r})
 	sum := sha256.Sum256(b)
 	return "cmp_" + hex.EncodeToString(sum[:16])
+}
+
+// StableFingerprint identifies the exact saved result instance. The comparison
+// ID is derived from the inputs alone, so deleting and recomputing the same
+// inputs reuses the ID but produces a different instance: the fingerprint also
+// covers the full computed payload and creation time. The fingerprint field
+// itself is deliberately excluded from its own input.
+func (r Result) StableFingerprint() string {
+	b, _ := json.Marshal(struct {
+		Version    int
+		ID         string
+		Algorithm  string
+		Request    Request
+		Segments   []Segment
+		Markers    []MarkerPair
+		OverlapMM  int64
+		KnownMM    int64
+		EqualMM    int64
+		Similarity *float64
+		CreatedAt  time.Time
+	}{
+		Version: 1, ID: r.ID, Algorithm: r.Algorithm, Request: r.Request,
+		Segments: r.Segments, Markers: r.Markers, OverlapMM: r.OverlapMM,
+		KnownMM: r.KnownMM, EqualMM: r.EqualMM, Similarity: r.Similarity,
+		CreatedAt: r.CreatedAt,
+	})
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 func (r Result) Clone() Result {

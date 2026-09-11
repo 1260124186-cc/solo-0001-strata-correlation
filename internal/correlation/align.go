@@ -74,5 +74,6 @@ func Align(left, right geology.Profile, request Request, now time.Time) (Result,
 			result.Markers = append(result.Markers, MarkerPair{layer.Marker, layer.TopMM, rightTop, rightTop - layer.TopMM})
 		}
 	}
+	result.Fingerprint = result.StableFingerprint()
 	return result, nil
 }

@@ -9,6 +9,12 @@ type Event struct {
 	At      time.Time `json:"at"`
 }
 
+// RevisionRef pins one historical revision of a profile.
+type RevisionRef struct {
+	ID      string `json:"id"`
+	Version int    `json:"version"`
+}
+
 type Revision struct {
 	Profile Profile `json:"profile"`
 	Event   Event   `json:"event"`

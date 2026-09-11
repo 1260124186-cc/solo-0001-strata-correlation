@@ -29,6 +29,11 @@
       "responsibility": "interval alignment"
     },
     {
+      "id": "review",
+      "path": "internal/review",
+      "responsibility": "review threads, replacement and migration chains"
+    },
+    {
       "id": "persistence",
       "path": "internal/persistence",
       "responsibility": "atomic snapshots and recovery"
@@ -102,6 +107,26 @@
         "api",
         "catalog",
         "correlation",
+        "persistence"
+      ]
+    },
+    {
+      "id": "review",
+      "name": "对比复核",
+      "entry": "POST /api/v1/comparisons/{id}/reviews",
+      "steps": [
+        "append conclusion with optimistic sequence",
+        "confirm and replace confirmed entries",
+        "survive result deletion and manually migrate on recomputation"
+      ],
+      "success": "fingerprint-bound review chain remains traceable",
+      "failure": "stale sequence rejected with latest ordering",
+      "verification": "bounded HTTP workflow smoke check",
+      "module_ids": [
+        "api",
+        "catalog",
+        "correlation",
+        "review",
         "persistence"
       ]
     },

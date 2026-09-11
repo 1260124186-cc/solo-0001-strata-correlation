@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/review"
 	"reflect"
 )
 
@@ -12,10 +13,16 @@ type State struct {
 	Schema      int                           `json:"schema"`
 	Histories   map[string][]geology.Revision `json:"histories"`
 	Comparisons map[string]correlation.Result `json:"comparisons"`
+	Reviews     map[string]review.Thread      `json:"reviews"`
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{
+		Schema:      1,
+		Histories:   map[string][]geology.Revision{},
+		Comparisons: map[string]correlation.Result{},
+		Reviews:     map[string]review.Thread{},
+	}
 }
 
 func (s State) Clone() State {
@@ -29,6 +36,9 @@ func (s State) Clone() State {
 	}
 	for id, result := range s.Comparisons {
 		out.Comparisons[id] = result.Clone()
+	}
+	for id, thread := range s.Reviews {
+		out.Reviews[id] = thread.Clone()
 	}
 	return out
 }
@@ -53,7 +63,7 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 }
 
 func (s State) Validate() error {
-	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
+	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil || s.Reviews == nil {
 		return fmt.Errorf("unsupported snapshot shape")
 	}
 	for id, history := range s.Histories {
@@ -105,6 +115,54 @@ func (s State) Validate() error {
 		actual, _ := json.Marshal(result)
 		if string(expected) != string(actual) {
 			return fmt.Errorf("comparison data mismatch")
+		}
+	}
+	active := map[string]string{}
+	for id, thread := range s.Reviews {
+		if id != thread.ID {
+			return fmt.Errorf("invalid review identity")
+		}
+		if err := thread.Validate(); err != nil {
+			return fmt.Errorf("invalid review %s: %w", id, err)
+		}
+		// A mismatch merely means the result was recomputed after the thread
+		// was written; the stale thread stays readable and must not be attached
+		// to the new instance. Only matching threads count as active.
+		if result, exists := s.Comparisons[thread.ComparisonID]; exists && result.Fingerprint == thread.Fingerprint {
+			if other, conflict := active[thread.ComparisonID]; conflict {
+				return fmt.Errorf("multiple active review threads for %s: %s and %s", thread.ComparisonID, other, id)
+			}
+			active[thread.ComparisonID] = id
+		}
+	}
+	for id, thread := range s.Reviews {
+		if thread.Origin != nil {
+			source, ok := s.Reviews[thread.Origin.SourceThreadID]
+			if !ok {
+				return fmt.Errorf("review %s references missing migration source", id)
+			}
+			if source.ComparisonID != thread.ComparisonID {
+				return fmt.Errorf("review %s migrated across comparisons", id)
+			}
+			found := false
+			for _, m := range source.Migrations {
+				if m.TargetThreadID == id {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("review migration chain incomplete for %s", id)
+			}
+		}
+		for _, m := range thread.Migrations {
+			target, ok := s.Reviews[m.TargetThreadID]
+			if !ok {
+				return fmt.Errorf("review %s points at missing migration target", id)
+			}
+			if target.Origin == nil || target.Origin.SourceThreadID != id {
+				return fmt.Errorf("review migration chain incomplete from %s", id)
+			}
 		}
 	}
 	return nil

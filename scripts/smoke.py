@@ -94,7 +94,9 @@ class Server:
             payload = response.read()
             if response.status != expected:
                 raise RuntimeError(f'{method} {path}: expected {expected}, got {response.status}: {payload.decode()}')
-        return payload.decode() if raw else json.loads(payload)
+        if raw:
+            return payload.decode()
+        return json.loads(payload) if payload.strip() else None
 
 
 def create(s, name='北坡剖面', site='赤石岭', depth=10000):
@@ -223,6 +225,134 @@ def compare(s):
     assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
 
 
+def review(s):
+    a, b = sealed(s, '复核西剖面'), sealed(s, '复核东剖面', 6000)
+    request = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
+    result = s.call('POST', '/api/v1/comparisons', request, 201)
+    cid = result['id']
+    s.call('GET', f'/api/v1/comparisons/{cid}/reviews', expected=404)
+    first = dict(expected_sequence=0, reviewer='王复核', conclusion='整体可采用，标志层对应良好',
+                 doubt_intervals=[dict(top_mm=4000, bottom_mm=6000)], adoption='pending')
+    thread = s.call('POST', f'/api/v1/comparisons/{cid}/reviews', first, 201)
+    assert thread['sequence'] == 1 and thread['active'] and thread['result_exists']
+    assert thread['entries'][0]['status'] == 'draft'
+    assert thread['entries'][0]['basis']['result_fingerprint'] == result['fingerprint']
+    assert thread['entries'][0]['basis']['left'] == request['left']
+    old_fingerprint = result['fingerprint']
+    # Stale optimistic sequence is rejected even for the first append race.
+    s.call('POST', f'/api/v1/comparisons/{cid}/reviews', first, 409)
+    # Confirm the draft.
+    thread = s.call('POST', f"/api/v1/reviews/{thread['id']}/entries/1/confirm",
+                    dict(expected_sequence=1), 200)
+    assert thread['entries'][0]['status'] == 'confirmed'
+    # A confirmed conclusion cannot be overwritten by another direct confirm.
+    second = dict(expected_sequence=1, reviewer='李复核', conclusion='补充说明，疑有断层',
+                  doubt_intervals=[], adoption='pending')
+    thread = s.call('POST', f'/api/v1/comparisons/{cid}/reviews', second, 201)
+    assert thread['entries'][1]['status'] == 'draft'
+    s.call('POST', f"/api/v1/reviews/{thread['id']}/entries/2/confirm",
+           dict(expected_sequence=2), 409)
+    # Only a replacement record can move past the confirmed conclusion.
+    replacement = dict(expected_sequence=2, reviewer='李复核',
+                       conclusion='上部砂岩相变，原采用结论需修正',
+                       doubt_intervals=[dict(top_mm=0, bottom_mm=2000)],
+                       adoption='adopted', status='draft', replaces=1,
+                       replace_reason='野外复查发现相变')
+    thread = s.call('POST', f'/api/v1/comparisons/{cid}/reviews', replacement, 201)
+    rid = thread['id']
+    assert thread['entries'][2]['replaces'] == 1 and thread['entries'][0]['status'] == 'confirmed'
+    # Concurrent appends with the same expected sequence: exactly one wins and
+    # the loser receives the newest conclusion ordering.
+    later = dict(expected_sequence=3, reviewer='王复核', conclusion='并发补充意见',
+                 doubt_intervals=[], adoption='pending')
+
+    def append(_):
+        req = urllib.request.Request(s.url + f'/api/v1/comparisons/{cid}/reviews', method='POST',
+                                     data=json.dumps(later, ensure_ascii=False).encode(),
+                                     headers={'Content-Type': 'application/json'})
+        try:
+            response = urllib.request.urlopen(req, timeout=10)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            return response.status, json.loads(response.read())
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(append, [0, 1]))
+    statuses = sorted(code for code, _ in outcomes)
+    assert statuses == [201, 409], outcomes
+    loser = next(payload for code, payload in outcomes if code == 409)
+    assert loser['actual_sequence'] == 4 and loser['expected_sequence'] == 3
+    assert [e['sequence'] for e in loser['thread']['entries']] == [1, 2, 3, 4]
+    # Confirming the replacement flips the original conclusion atomically.
+    thread = s.call('POST', f'/api/v1/reviews/{rid}/entries/3/confirm',
+                    dict(expected_sequence=4), 200)
+    page = s.call('GET', f'/api/v1/comparisons/{cid}/reviews')
+    thread = page['items'][0]
+    assert thread['entries'][0]['status'] == 'superseded'
+    assert thread['entries'][2]['status'] == 'confirmed'
+    # The replacement chain is traceable in both directions.
+    assert thread['entries'][2]['replaces'] == 1
+    assert thread['entries'][0]['basis']['result_fingerprint'] == old_fingerprint
+    assert thread['entries'][2]['basis']['right']['version'] == 3
+    # Deleting the result keeps reviews readable, marked as basis gone.
+    s.call('DELETE', f'/api/v1/comparisons/{cid}', expected=204)
+    s.call('GET', f'/api/v1/comparisons/{cid}', expected=404)
+    stale = s.call('GET', f'/api/v1/reviews/{rid}')
+    assert not stale['result_exists'] and not stale['active'] and stale['entries'][0]['status'] == 'superseded'
+    listed = s.call('GET', f'/api/v1/comparisons/{cid}/reviews')
+    assert not listed['result_exists'] and listed['items'][0]['id'] == rid
+    s.call('POST', f'/api/v1/reviews/{rid}/entries/1/confirm',
+           dict(expected_sequence=4), 409)
+    # Recomputing the same inputs yields a new instance; the old thread must not
+    # attach itself automatically.
+    s.stop()
+    s.start()
+    recomputed = s.call('POST', '/api/v1/comparisons', request, 201)
+    assert recomputed['id'] == cid and recomputed['fingerprint'] != old_fingerprint
+    page = s.call('GET', f'/api/v1/comparisons/{cid}/reviews')
+    assert page['result_exists'] and not page.get('current_thread')
+    old_thread = page['items'][0]
+    assert not old_thread['active'] and old_thread['result_changed']
+    # Appending a conclusion on the new instance starts a fresh thread, leaving
+    # the old one untouched.
+    fresh = dict(expected_sequence=0, reviewer='王复核', conclusion='针对重算结果重新复核',
+                 doubt_intervals=[], adoption='pending')
+    new_thread = s.call('POST', f'/api/v1/comparisons/{cid}/reviews', fresh, 201)
+    assert new_thread['fingerprint'] == recomputed['fingerprint']
+    assert new_thread['entries'][0]['basis']['result_fingerprint'] == recomputed['fingerprint']
+    # Manual migration is blocked once the new instance already has a thread.
+    s.call('POST', f'/api/v1/reviews/{rid}/migrate',
+           dict(expected_sequence=3, reviewer='王复核', reason='重新挂接'), 409)
+    # Delete the fresh thread's competing result path is not possible, so verify
+    # migration on a second scenario using another comparison.
+    other = s.call('POST', '/api/v1/comparisons',
+                   {**request, 'offset_mm': -2000}, 201)
+    oid = other['id']
+    body = dict(expected_sequence=0, reviewer='赵复核', conclusion='暂定采用',
+                doubt_intervals=[], adoption='pending', status='confirmed')
+    origin = s.call('POST', f'/api/v1/comparisons/{oid}/reviews', body, 201)
+    origin_id = origin['id']
+    s.call('DELETE', f'/api/v1/comparisons/{oid}', expected=204)
+    again = s.call('POST', '/api/v1/comparisons', {**request, 'offset_mm': -2000}, 201)
+    assert again['fingerprint'] != other['fingerprint']
+    s.call('POST', f'/api/v1/reviews/{origin_id}/migrate', dict(expected_sequence=0), 422)
+    migrated = s.call('POST', f'/api/v1/reviews/{origin_id}/migrate',
+                      dict(expected_sequence=1, reviewer='赵复核', reason='人工迁移到重算结果'), 201)
+    assert migrated['active'] and migrated['origin']['source_thread_id'] == origin_id
+    assert migrated['entries'][0]['origin_sequence'] == 1
+    assert migrated['entries'][0]['basis']['result_fingerprint'] == again['fingerprint']
+    source = s.call('GET', f'/api/v1/reviews/{origin_id}')
+    assert source['migrations'][0]['target_thread_id'] == migrated['id']
+    assert source['current_thread'] == migrated['id'] and source['result_changed']
+    # Migrating twice from the same generation is refused.
+    s.call('POST', f'/api/v1/reviews/{origin_id}/migrate',
+           dict(expected_sequence=1, reviewer='赵复核', reason='再次迁移'), 409)
+    # Restart recovery covers reviews and migration links.
+    s.stop()
+    s.start()
+    assert s.call('GET', f'/api/v1/reviews/{migrated["id"]}')['active']
+
+
 def browse(s):
     a = sealed(s, '赤石北剖面')
     b = create(s, '赤石南剖面')
@@ -245,9 +375,9 @@ def browse(s):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'review', 'browse', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'review', 'browse'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)
