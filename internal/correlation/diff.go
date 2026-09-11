@@ -3,6 +3,7 @@ package correlation
 import (
 	"fmt"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
+	"sort"
 	"strings"
 )
 
@@ -83,18 +84,43 @@ func DiffOf(from, to Result) Diff {
 	}
 	diff.Summary = append(diff.Summary, fmt.Sprintf("共同区间保持 %d 毫米不变（切分规则相同）。", to.OverlapMM))
 	if from.KnownMM != to.KnownMM {
-		diff.Summary = append(diff.Summary, fmt.Sprintf(
-			"计入相似度的已知长度由 %d 毫米变为 %d 毫米（%s 把仅一侧未知的区间判为 different）。",
-			from.KnownMM, to.KnownMM, to.Algorithm))
+		// 规则归给实际的目标版本，方向跟随 from/to，不能写死成某个版本的升级方向。
+		switch {
+		case to.KnownMM > from.KnownMM:
+			diff.Summary = append(diff.Summary, fmt.Sprintf(
+				"计入相似度的已知长度由 %d 毫米变为 %d 毫米：%s 把仅一侧未知的区间判为 different 并计入分母（%s 中为 unknown，不计入）。",
+				from.KnownMM, to.KnownMM, to.Algorithm, from.Algorithm))
+		default:
+			diff.Summary = append(diff.Summary, fmt.Sprintf(
+				"计入相似度的已知长度由 %d 毫米变为 %d 毫米：%s 把仅一侧未知的区间判为 unknown 并移出分母（%s 中为 different，计入分母）。",
+				from.KnownMM, to.KnownMM, to.Algorithm, from.Algorithm))
+		}
 	}
 	if from.EqualMM != to.EqualMM {
 		diff.Summary = append(diff.Summary, fmt.Sprintf("岩性相同长度由 %d 毫米变为 %d 毫米。", from.EqualMM, to.EqualMM))
 	}
 	if !pointerFloatEqual(from.Similarity, to.Similarity) {
-		diff.Summary = append(diff.Summary, fmt.Sprintf("相似度由 %s 变为 %s。", ratioText(from.Similarity), ratioText(to.Similarity)))
+		diff.Summary = append(diff.Summary, fmt.Sprintf("相似度由 %s（%s）变为 %s（%s）。",
+			ratioText(from.Similarity), from.Algorithm, ratioText(to.Similarity), to.Algorithm))
 	}
 	if len(diff.Changes) > 0 {
-		diff.Summary = append(diff.Summary, fmt.Sprintf("共有 %d 个区间的关系归类发生变化（unknown→different），详见 changes。", len(diff.Changes)))
+		// 逐区间按实际的 from→to 关系归类聚合计数，反向重算时显示 different→unknown。
+		transitions := map[string]int{}
+		order := []string{}
+		for _, c := range diff.Changes {
+			label := c.FromRelation + "→" + c.ToRelation
+			if _, seen := transitions[label]; !seen {
+				order = append(order, label)
+			}
+			transitions[label]++
+		}
+		sort.Strings(order)
+		parts := make([]string, 0, len(order))
+		for _, label := range order {
+			parts = append(parts, fmt.Sprintf("%s %d 个", label, transitions[label]))
+		}
+		diff.Summary = append(diff.Summary, fmt.Sprintf(
+			"共有 %d 个区间的关系归类发生变化（%s），详见 changes。", len(diff.Changes), strings.Join(parts, "，")))
 	}
 	return diff
 }

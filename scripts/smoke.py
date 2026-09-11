@@ -265,11 +265,34 @@ def compare(s):
     assert {c['to_relation'] for c in diff['changes']} == {'different'}
     assert sum(c['thickness_mm'] for c in diff['changes']) == 10000
     assert diff['summary']
+    forward_text = ' '.join(diff['summary'])
+    assert 'unknown→different' in forward_text and 'interval-v2 把仅一侧未知的区间判为 different' in forward_text
     assert s.call('GET', '/api/v1/comparisons?algorithm=interval-v1')['total'] == 2
     # 对两侧岩性都已知的结果，两版本结论一致。
     same = s.call('GET', f'/api/v1/comparisons/{v1["id"]}/algorithm-diff?algorithm=interval-v2')
     assert same['identical'] and same['changes'] == []
     s.call('GET', f'/api/v1/comparisons/{v1["id"]}/algorithm-diff?algorithm=interval-v1', expected=409)
+
+    # 反向预览（v2→v1）：变化必须显示 different→unknown，规则归给目标 v1，分母回落。
+    reverse_v2 = s.call('POST', '/api/v1/comparisons',
+                        dict(left=request['left'], right=dict(id=c['id'], version=3),
+                             offset_mm=4000, algorithm='interval-v2'), 201)
+    assert reverse_v2['known_mm'] == 6000 and reverse_v2['similarity'] == 0
+    reverse = s.call('GET', f'/api/v1/comparisons/{reverse_v2["id"]}/algorithm-diff?algorithm=interval-v1')
+    assert reverse['from_algorithm'] == 'interval-v2' and reverse['to_algorithm'] == 'interval-v1'
+    assert not reverse['identical']
+    assert reverse['from_metrics']['known_mm'] == 6000 and reverse['to_metrics']['known_mm'] == 0
+    assert reverse['to_metrics']['similarity'] is None
+    assert len(reverse['changes']) == 1
+    assert sum(x['thickness_mm'] for x in reverse['changes']) == 6000
+    assert {x['from_relation'] for x in reverse['changes']} == {'different'}
+    assert {x['to_relation'] for x in reverse['changes']} == {'unknown'}
+    reverse_text = ' '.join(reverse['summary'])
+    assert 'different→unknown' in reverse_text and 'unknown→different' not in reverse_text
+    assert 'interval-v1 把仅一侧未知的区间判为 unknown' in reverse_text
+    assert '由 6000 毫米变为 0 毫米' in reverse_text
+    # 预览不落盘：v1 侧仍是 2 条。
+    assert s.call('GET', '/api/v1/comparisons?algorithm=interval-v1')['total'] == 2
 
     # 目标版本尚未保存时，重算生成新结果（201）并保留原结果；偏移 -4000 只有 v1。
     fresh_v1 = s.call('POST', '/api/v1/comparisons', {**v1_request, 'offset_mm': -4000}, 201)
@@ -284,6 +307,16 @@ def compare(s):
     assert reused['reused'] and reused['result']['id'] == unknown_v2['id']
     assert s.call('GET', f'/api/v1/comparisons/{unknown_v1["id"]}') == unknown_v1
     s.call('POST', f'/api/v1/comparisons/{unknown_v2["id"]}/recompute', dict(algorithm='interval-v2'), 409)
+
+    # 反向重算（v2→v1）生成新结果并保留 v2 原结果，返回的差异说明同样按反向措辞。
+    back = s.call('POST', f'/api/v1/comparisons/{reverse_v2["id"]}/recompute', dict(algorithm='interval-v1'), 201)
+    assert not back['reused'] and back['source']['id'] == reverse_v2['id']
+    assert back['result']['algorithm'] == 'interval-v1' and back['result']['id'] != reverse_v2['id']
+    assert back['diff']['from_algorithm'] == 'interval-v2' and back['diff']['to_algorithm'] == 'interval-v1'
+    back_text = ' '.join(back['diff']['summary'])
+    assert 'different→unknown' in back_text and 'interval-v1 把仅一侧未知的区间判为 unknown' in back_text
+    assert back['result']['known_mm'] == 0 and back['result']['similarity'] is None
+    assert s.call('GET', f'/api/v1/comparisons/{reverse_v2["id"]}') == reverse_v2
 
     state(s, a, 'reopen')
     assert s.call('POST', '/api/v1/comparisons', request) == result
