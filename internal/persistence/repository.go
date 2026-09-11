@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"sync"
 	"syscall"
 
@@ -141,60 +142,39 @@ func (r *Repository) Update(ctx context.Context, fn func(*State) (bool, error)) 
 	return nil
 }
 
+// shardWrite is one planned atomic replacement in the shard directory.
+type shardWrite struct {
+	id       string
+	name     string
+	contents []byte
+}
+
 // commit persists only the shards that differ from the in-memory state.
-// Shards commit one at a time; a crash between them recovers deterministically
-// on restart from whatever landed. Memory only advances after every changed
-// shard is durable, so on a mid-transaction I/O failure reads still serve the
-// last consistent state — while fault is set (a shard may have landed) and the
-// health endpoint reports the memory/disk divergence as 503 until restart.
+// Every changed shard is encoded and capacity-checked before the first disk
+// write, so an oversized history is refused as an ordinary conflict with no
+// shard touched, memory unchanged and health intact. Shards then commit one
+// at a time; a crash between them recovers deterministically on restart from
+// whatever landed. Memory only advances after every planned shard is durable,
+// so on a mid-transaction I/O failure reads still serve the last consistent
+// state — while fault is set (a shard may have landed) and the health endpoint
+// reports the memory/disk divergence as 503 until restart.
 func (r *Repository) commit(next State) error {
+	writes, err := r.planCommit(next)
+	if err != nil {
+		return err
+	}
+
 	committed := 0
-	fail := func(id string, err error) error {
-		if committed > 0 {
-			r.fault = fmt.Errorf("partial shard commit: %d shard(s) durable before failure", committed)
-		}
-		return fmt.Errorf("persist shard %s: %w", id, err)
-	}
-
-	var ids []string
-	for id, history := range next.Histories {
-		current, exists := r.state.Histories[id]
-		if !exists || !reflect.DeepEqual(current, history) {
-			ids = append(ids, id)
-		}
-	}
-	for _, id := range ids {
-		contents, err := encodeProfileShard(id, next.Histories[id])
-		if err != nil {
-			return fail(id, err)
-		}
-		durable, err := writeFileAtomic(r.shards, shardName(id), contents)
+	for _, write := range writes {
+		durable, writeErr := writeFileAtomic(r.shards, write.name, write.contents)
 		if durable {
 			committed++
 		}
-		if err != nil {
-			return fail(id, err)
-		}
-	}
-
-	var cmpIDs []string
-	for id, result := range next.Comparisons {
-		current, exists := r.state.Comparisons[id]
-		if !exists || !reflect.DeepEqual(current, result) {
-			cmpIDs = append(cmpIDs, id)
-		}
-	}
-	for _, id := range cmpIDs {
-		contents, err := encodeComparisonShard(next.Comparisons[id])
-		if err != nil {
-			return fail(id, err)
-		}
-		durable, err := writeFileAtomic(r.shards, shardName(id), contents)
-		if durable {
-			committed++
-		}
-		if err != nil {
-			return fail(id, err)
+		if writeErr != nil {
+			if committed > 0 {
+				r.fault = fmt.Errorf("partial shard commit: %d shard(s) durable before failure", committed)
+			}
+			return fmt.Errorf("persist shard %s: %w", write.id, writeErr)
 		}
 	}
 
@@ -212,6 +192,52 @@ func (r *Repository) commit(next State) error {
 		r.state.Comparisons[id] = result.Clone()
 	}
 	return nil
+}
+
+// planCommit encodes every shard that differs from the in-memory state in a
+// deterministic order and rejects the update up front if one would exceed the
+// per-shard 64 MiB limit. No file is written here, which keeps oversized
+// requests indistinguishable from validation rejections on disk.
+func (r *Repository) planCommit(next State) ([]shardWrite, error) {
+	var writes []shardWrite
+	ids := make([]string, 0)
+	for id, history := range next.Histories {
+		current, exists := r.state.Histories[id]
+		if !exists || !reflect.DeepEqual(current, history) {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		contents, err := encodeProfileShard(id, next.Histories[id])
+		if err != nil {
+			return nil, err
+		}
+		if len(contents) > maxShard {
+			return nil, geology.Conflict("该剖面的版本历史超过 64 MiB 持久化上限，不能再追加版本")
+		}
+		writes = append(writes, shardWrite{id: id, name: shardName(id), contents: contents})
+	}
+
+	cmpIDs := make([]string, 0)
+	for id, result := range next.Comparisons {
+		current, exists := r.state.Comparisons[id]
+		if !exists || !reflect.DeepEqual(current, result) {
+			cmpIDs = append(cmpIDs, id)
+		}
+	}
+	sort.Strings(cmpIDs)
+	for _, id := range cmpIDs {
+		contents, err := encodeComparisonShard(next.Comparisons[id])
+		if err != nil {
+			return nil, err
+		}
+		if len(contents) > maxShard {
+			return nil, geology.Conflict("该对比结果超过 64 MiB 持久化上限")
+		}
+		writes = append(writes, shardWrite{id: id, name: shardName(id), contents: contents})
+	}
+	return writes, nil
 }
 
 func (r *Repository) Health() error {

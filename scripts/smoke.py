@@ -44,7 +44,10 @@ class Server:
         )
         with selectors.DefaultSelector() as selector:
             selector.register(self.process.stdout, selectors.EVENT_READ)
-            if not selector.select(timeout=10):
+            # Loading and validating a near-limit shard can take longer than a
+            # normal start under the race detector; the default stays tight.
+            ready_timeout = int(os.environ.get('STRATA_SMOKE_READY_TIMEOUT', '10'))
+            if not selector.select(timeout=ready_timeout):
                 raise RuntimeError('server did not become ready')
             line = self.process.stdout.readline().strip()
         if not line.startswith('STRATA_LISTEN='):
@@ -300,11 +303,99 @@ def migrate(s):
     assert s.call('GET', f'/api/v1/profiles/{expected["id"]}') == expected
 
 
+def status_call(s, method, path, body):
+    """Like Server.call but returns (status, payload) without asserting."""
+    data = None if body is None else json.dumps(body, ensure_ascii=False).encode()
+    request = urllib.request.Request(s.url + path, data=data, method=method,
+                                     headers={'Content-Type': 'application/json'})
+    try:
+        response = urllib.request.urlopen(request, timeout=30)
+    except urllib.error.HTTPError as error:
+        response = error
+    with response:
+        return response.status, response.read().decode()
+
+
+def capacity(s):
+    # 500 layers each with a 900-character description grow every sealed
+    # revision by roughly 1.5 MiB; sealing and reopening records the full
+    # layer set in two revisions per cycle. The 64 MiB shard limit must be hit
+    # before the 500-version limit, and the oversized write must be refused.
+    p = create(s, '大容量剖面', '赤石岭', 1000000)
+    fill = []
+    for i in range(500):
+        top, bottom = i * 2000, (i + 1) * 2000
+        fill.append(dict(top_mm=top, bottom_mm=bottom, rock='sandstone' if i % 2 else 'mudstone',
+                         description='描' * 900, marker=''))
+    rejected = None
+    last = p
+    for cycle in range(30):
+        body = dict(expected_version=last['version'], layers=fill, reason='补充分层记录')
+        status, payload = status_call(s, 'PUT', f'/api/v1/profiles/{p["id"]}/layers', body)
+        if status == 409:
+            rejected = ('layers', json.loads(payload))
+            break
+        assert status == 200, (status, payload)
+        last = json.loads(payload)
+        status, payload = status_call(s, 'POST', f'/api/v1/profiles/{p["id"]}/seal',
+                                      dict(expected_version=last['version'], reason='完成核对'))
+        if status == 409:
+            rejected = ('seal', json.loads(payload))
+            break
+        assert status == 200, (status, payload)
+        last = json.loads(payload)
+        status, payload = status_call(s, 'POST', f'/api/v1/profiles/{p["id"]}/reopen',
+                                      dict(expected_version=last['version'], reason='继续补录'))
+        if status == 409:
+            rejected = ('reopen', json.loads(payload))
+            break
+        assert status == 200, (status, payload)
+        last = json.loads(payload)
+    assert rejected is not None, 'never reached the shard capacity limit'
+    assert '64 MiB' in rejected[1]['error']['detail'], rejected
+    assert s.call('GET', '/healthz')['status'] == 'ready'
+
+    # The refused revision never entered memory or disk.
+    current = s.call('GET', f'/api/v1/profiles/{p["id"]}')
+    assert current == last
+    shard = s.directory / 'data' / 'shards' / f'{p["id"]}.json'
+    persisted = shard.stat().st_size
+    assert persisted <= 64 * 1024 * 1024, persisted
+    # Replaying the exact oversized request is rejected the same way; the
+    # refused (not durable) revision must not have mutated memory or disk.
+    def attempt_overflow():
+        if rejected[0] == 'layers':
+            body = dict(expected_version=last['version'], layers=fill, reason='再次补录')
+            return status_call(s, 'PUT', f'/api/v1/profiles/{p["id"]}/layers', body)
+        action = 'seal' if rejected[0] == 'seal' else 'reopen'
+        return status_call(s, 'POST', f'/api/v1/profiles/{p["id"]}/{action}',
+                           dict(expected_version=last['version'], reason='再次尝试'))
+    status, payload = attempt_overflow()
+    assert status == 409 and '64 MiB' in json.loads(payload)['error']['detail'], (status, payload)
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == current
+
+    # Another profile remains fully writable: one oversized shard cannot lock
+    # the whole directory.
+    other = replace(s, create(s, '其他剖面'), layers())
+    assert other['version'] == 2
+
+    # Restart from the last accepted state: recovery must succeed despite the
+    # store containing a shard just under the 64 MiB read-side limit.
+    s.stop()
+    s.start()
+    assert s.call('GET', '/healthz')['status'] == 'ready'
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == current
+    assert s.call('GET', f'/api/v1/profiles/{other["id"]}') == other
+    status, payload = attempt_overflow()
+    assert status == 409 and '64 MiB' in json.loads(payload)['error']['detail'], (status, payload)
+    assert not list(s.directory.glob('data/shards/.strata-*'))
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'migrate', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'migrate', 'capacity', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse', 'migrate'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'migrate', 'capacity'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)
