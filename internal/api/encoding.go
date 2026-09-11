@@ -32,6 +32,10 @@ func decode(w http.ResponseWriter, r *http.Request, dst any) error {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err = decoder.Decode(dst); err != nil {
+		var problem *geology.Problem
+		if errors.As(err, &problem) {
+			return problem
+		}
 		return decodeError(err)
 	}
 	var extra any
@@ -59,7 +63,7 @@ func fail(w http.ResponseWriter, r *http.Request, err error, logger *slog.Logger
 		switch problem.Code {
 		case "missing":
 			status = http.StatusNotFound
-		case "conflict":
+		case "conflict", "version_conflict":
 			status = http.StatusConflict
 		case "media_type":
 			status = http.StatusUnsupportedMediaType

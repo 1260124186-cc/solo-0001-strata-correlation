@@ -51,6 +51,26 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 锁定成功返回版本 3。修改必须携带当前 `expected_version`；相同版本的并发请求只有一个成功，其余得到 HTTP 409。`ETag` 仅描述响应版本，写入以 JSON 中的 `expected_version` 为准。已锁定剖面需要通过 `/reopen` 重新打开，新版本不会改变历史记录。
 
+只改一个字段时使用 `PATCH /api/v1/profiles/<id>`，请求体与 PUT 相同，但 `metadata` 中只需给出待修改字段（下例假设剖面已重新打开，当前为草拟态版本 4）：
+
+```bash
+curl -sS -X PATCH "http://127.0.0.1:8093/api/v1/profiles/<profile-id>" \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version":4,"reason":"补充编录说明","metadata":{"note":"新增标志层观测记录"}}'
+```
+
+未出现的字段保持原值，因此不会用客户端的旧值覆盖他人刚改过的内容。`note` 传空串可以显式清空说明；`name`、`site` 不允许清空，清空或只传空白会被拒绝（422）。`metadata` 为空对象、缺少 `metadata` 或字段传 `null` 同样会被拒绝。PUT 仍是完整替换：`metadata` 中省略的字段按零值处理，名称和地点缺失会被拒绝。两个入口共用同一套版本校验、锁定边界和事件结构，走 PATCH 不能修改锁定剖面或绕过 `/reopen`。
+
+并发提交同一 `expected_version` 时只有一个成功。失败方得到 409，错误体指出当前版本以及从预期版本到当前版本之间已经变化的字段：
+
+```json
+{"error":{"code":"version_conflict","detail":"预期版本 5，当前版本 6",
+  "expected_version":5,"current_version":6,
+  "changed_fields":[{"field":"note","before":"","after":"新增标志层观测记录"}]}}
+```
+
+剖面在预期版本之后还经历过锁定/重新打开时，`changed_fields` 会额外包含 `state`。命中版本但剖面已锁定时返回不带 `changed_fields` 的普通 `conflict`。
+
 ## 对比两个锁定版本
 
 ```json
@@ -81,6 +101,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /profiles` | `q, site, state, rock, offset, limit` 筛选与分页 |
 | `GET /profiles/{id}` | 当前完整剖面 |
 | `PUT /profiles/{id}` | `expected_version, reason, metadata` 整体替换元数据 |
+| `PATCH /profiles/{id}` | `expected_version, reason, metadata` 局部更新元数据，省略字段保持原值 |
 | `PUT /profiles/{id}/layers` | `expected_version, reason, layers` 整体替换分层 |
 | `GET /profiles/{id}/coverage` | 缺口、各岩性厚度和能否锁定 |
 | `GET /profiles/{id}/at` | 必填 `depth_mm`，可选 `version`；返回所属层或缺口 |
@@ -96,6 +117,8 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /comparisons/{id}/csv` | 区间 CSV |
 
 上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
+
+元数据修订事件（PUT 与 PATCH 产生的 `action: "metadata"`）带 `changes` 数组，按 `name、site、note、depth_mm` 的固定顺序列出本次实际改变的字段及前后值，没有字段变化时为空数组省略；`seal / reopen / layers / create` 事件不带 `changes`。翻历史时可直接据此判断每次修订动了什么，无需自行对比相邻版本。
 
 单个剖面最多 500 层、500 个历史版本，总深度最大 1000000 毫米。最多 2000 个剖面、10000 个对比结果，总快照上限 64 MiB。岩性支持 `sandstone / mudstone / limestone / shale / conglomerate / unknown`。名称最多 120 字、地点 200 字、说明 2000 字，单层描述 1000 字，标志层名称 80 字，修订理由 1–500 字。标志层名称在同一剖面内忽略大小写后必须唯一。
 

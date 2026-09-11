@@ -120,8 +120,15 @@ func validateStep(before geology.Profile, r geology.Revision) error {
 		if r.Event.Action == "layers" && before.Metadata != after.Metadata {
 			return fmt.Errorf("layers edit changed metadata")
 		}
-		if r.Event.Action == "metadata" && !reflect.DeepEqual(before.Layers, after.Layers) {
-			return fmt.Errorf("metadata edit changed layers")
+		if r.Event.Action == "metadata" {
+			if !reflect.DeepEqual(before.Layers, after.Layers) {
+				return fmt.Errorf("metadata edit changed layers")
+			}
+			// changes 缺失表示旧版本快照，仅依赖摘要防篡改；
+			// 新代码写出的事件必须逐字段与实际差异一致。
+			if r.Event.Changes != nil && !reflect.DeepEqual(r.Event.Changes, geology.MetadataChanges(before, after)) {
+				return fmt.Errorf("metadata event changes do not match profile diff")
+			}
 		}
 	case "seal", "reopen":
 		expected := geology.Sealed
@@ -130,6 +137,9 @@ func validateStep(before geology.Profile, r geology.Revision) error {
 		}
 		if after.State != expected || before.State == expected || before.Metadata != after.Metadata || !reflect.DeepEqual(before.Layers, after.Layers) {
 			return fmt.Errorf("invalid state change")
+		}
+		if len(r.Event.Changes) != 0 {
+			return fmt.Errorf("state change event must not carry metadata changes")
 		}
 	default:
 		return fmt.Errorf("unknown revision action")

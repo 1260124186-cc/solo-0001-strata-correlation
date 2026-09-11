@@ -7,6 +7,9 @@ type Event struct {
 	Reason  string    `json:"reason"`
 	Version int       `json:"version"`
 	At      time.Time `json:"at"`
+	// Changes 记录本次元数据修订实际改变的字段及前后值，供历史查阅。
+	// 完整替换与局部更新产生的事件使用同一结构。
+	Changes []FieldChange `json:"changes,omitempty"`
 }
 
 type Revision struct {
@@ -19,6 +22,8 @@ func (r Revision) Clone() Revision {
 	return r
 }
 
+// CheckEditable 是所有剖面写入共用的版本与锁定边界校验：
+// 预期版本必须等于当前版本，且剖面必须处于草拟状态。
 func CheckEditable(p Profile, expected int) error {
 	if p.Version != expected {
 		return VersionConflict(expected, p.Version)

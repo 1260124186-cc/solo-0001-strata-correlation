@@ -3,6 +3,7 @@
 import argparse
 import concurrent.futures
 import csv
+import hashlib
 import io
 import json
 import os
@@ -140,17 +141,42 @@ def record(s):
     point = s.call('GET', f'/api/v1/profiles/{p["id"]}/at?depth_mm=4000')
     assert point['layer']['rock'] == 'mudstone' and point['distance_from_top_mm'] == 0
     s.call('GET', f'/api/v1/profiles/{p["id"]}/at?depth_mm=10000', expected=422)
-    body = dict(expected_version=p['version'], metadata=dict(name=p['name'], site=p['site'], depth_mm=3000), reason='调整深度')
+    patched = s.call('PATCH', f'/api/v1/profiles/{p["id"]}',
+                     dict(expected_version=p['version'], metadata=dict(note='局部修订说明'), reason='补记说明'))
+    assert patched['version'] == p['version'] + 1
+    assert patched['name'] == p['name'] and patched['site'] == p['site']
+    assert patched['depth_mm'] == p['depth_mm'] and patched['layers'] == p['layers']
+    assert patched['note'] == '局部修订说明'
+    event = s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/{patched["version"]}')['event']
+    assert event['action'] == 'metadata' and event['changes'] == [
+        dict(field='note', before='岩层编录', after='局部修订说明')]
+    cleared = s.call('PATCH', f'/api/v1/profiles/{p["id"]}',
+                     dict(expected_version=patched['version'], metadata=dict(note=''), reason='清空说明'))
+    assert cleared['version'] == patched['version'] + 1 and cleared['note'] == ''
+    for bad in [
+        dict(expected_version=cleared['version'], metadata=dict(), reason='空补丁'),
+        dict(expected_version=cleared['version'], metadata=dict(name='  '), reason='清空名称'),
+        dict(expected_version=cleared['version'], metadata=dict(site=''), reason='清空地点'),
+        dict(expected_version=cleared['version'], metadata=dict(note=None), reason='空值说明'),
+        dict(expected_version=cleared['version'], reason='缺少元数据'),
+        dict(expected_version=cleared['version'], metadata=dict(note='x', extra=1), reason='未知字段'),
+        dict(expected_version=cleared['version'], metadata=dict(note='x'), reason='',),
+    ]:
+        s.call('PATCH', f'/api/v1/profiles/{p["id"]}', bad, 422)
+    s.call('PATCH', f'/api/v1/profiles/{p["id"]}',
+           dict(expected_version=cleared['version'], metadata=dict(depth_mm=3000), reason='收紧深度'), 422)
+    body = dict(expected_version=cleared['version'],
+                metadata=dict(name=cleared['name'], site=cleared['site'], depth_mm=3000), reason='调整深度')
     s.call('PUT', f'/api/v1/profiles/{p["id"]}', body, 422)
     s.stop()
     s.start()
-    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == p
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == cleared
     s.process.kill()
     s.process.wait(timeout=5)
     s.process.stdout.close()
     s.process = None
     s.start()
-    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == p
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == cleared
     s.stop()
     snapshot = s.directory / 'data' / 'strata.json'
     original = snapshot.read_bytes()
@@ -161,12 +187,68 @@ def record(s):
     assert attempt.returncode != 0 and b'checksum mismatch' in attempt.stderr
     snapshot.write_bytes(original)
     s.start()
-    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == p
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == cleared
+    s.stop()
+
+    def rewrap(mutate):
+        envelope = json.loads(original)
+        start = original.index(b'{', original.index(b'"data"'))
+        depth, in_string, escaped, end = 0, False, False, -1
+        for i in range(start, len(original)):
+            c = original[i]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif c == ord('\\'):
+                    escaped = True
+                elif c == ord('"'):
+                    in_string = False
+            elif c == ord('"'):
+                in_string = True
+            elif c == ord('{'):
+                depth += 1
+            elif c == ord('}'):
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        data_text = original[start:end].decode()
+        data = json.loads(data_text)
+        mutate(data)
+        data_text = json.dumps(data, ensure_ascii=False)
+        digest = hashlib.sha256(data_text.encode()).hexdigest()
+        snapshot.write_text('{"digest":' + json.dumps(digest) + ',"data":' + data_text + '}')
+
+    def strip_changes(data):
+        for revisions in data['histories'].values():
+            for revision in revisions:
+                revision['event'].pop('changes', None)
+    rewrap(strip_changes)
+    s.start()
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == cleared
+    s.stop()
+
+    def lie_changes(data):
+        strip_changes(data)
+        for revisions in data['histories'].values():
+            for revision in revisions:
+                if revision['event']['action'] == 'metadata':
+                    revision['event']['changes'] = [
+                        dict(field='note', before='不存在的旧值', after='')]
+    rewrap(lie_changes)
+    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(s.directory/'data')], capture_output=True, timeout=10)
+    assert attempt.returncode != 0 and b'changes do not match' in attempt.stderr
+    snapshot.write_bytes(original)
+    s.start()
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == cleared
 
 
 def seal(s):
     p = sealed(s, '锁定剖面')
     replace(s, p, layers(), 409)
+    locked_patch = s.call('PATCH', f'/api/v1/profiles/{p["id"]}',
+                          dict(expected_version=3, metadata=dict(note='锁定后改说明'), reason='绕过尝试'), 409)
+    assert locked_patch['error']['code'] == 'conflict' and 'changed_fields' not in locked_patch['error']
     locked = s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/3')
     p = state(s, p, 'reopen')
     state(s, p, 'reopen', 409)
@@ -186,9 +268,44 @@ def seal(s):
     assert sorted(codes) == [200, 409], codes
     current = s.call('GET', f'/api/v1/profiles/{p["id"]}')
     assert current['version'] == 5
+    assert current['name'] in ('东岭剖面', '西岭剖面')
+    def patch_note(note):
+        request = urllib.request.Request(
+            s.url+f'/api/v1/profiles/{p["id"]}', method='PATCH',
+            data=json.dumps(dict(expected_version=5, metadata=dict(note=note), reason='补记说明')).encode(),
+            headers={'Content-Type': 'application/json'})
+        try:
+            response = urllib.request.urlopen(request, timeout=10)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            payload = json.loads(response.read())
+        assert response.status in (200, 409), response.status
+        return payload
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(patch_note, ['南翼补勘说明', '北翼补勘说明']))
+    winner = next(r for r in results if 'version' in r)
+    loser = next(r for r in results if 'error' in r)
+    assert winner['version'] == 6 and winner['note'] in ('南翼补勘说明', '北翼补勘说明')
+    error = loser['error']
+    assert error['code'] == 'version_conflict' and error['expected_version'] == 5 and error['current_version'] == 6
+    assert error['changed_fields'] == [dict(field='note', before='', after=winner['note'])]
+    event = s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/6')['event']
+    assert event['changes'] == [dict(field='note', before='', after=winner['note'])]
+    stale = s.call('PATCH', f'/api/v1/profiles/{p["id"]}',
+                   dict(expected_version=4, metadata=dict(note='落后两版的说明'), reason='过期提交'), 409)['error']
+    assert stale['expected_version'] == 4 and stale['current_version'] == 6
+    assert {f['field'] for f in stale['changed_fields']} == {'name', 'note'}
+    stale_sealed = s.call('PATCH', f'/api/v1/profiles/{p["id"]}',
+                          dict(expected_version=3, metadata=dict(note='从锁定版起算'), reason='过期提交'), 409)['error']
+    assert {f['field'] for f in stale_sealed['changed_fields']} == {'state', 'name', 'note'}
+    state_change = next(f for f in stale_sealed['changed_fields'] if f['field'] == 'state')
+    assert state_change['before'] == 'sealed' and state_change['after'] == 'draft'
+    s.call('PATCH', f'/api/v1/profiles/{p["id"]}',
+           dict(expected_version=99, metadata=dict(note='未来版本'), reason='越界提交'), 409)
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/3') == locked
     history = s.call('GET', f'/api/v1/profiles/{p["id"]}/history?offset=2&limit=2')
-    assert history['total'] == 5 and [x['action'] for x in history['items']] == ['seal', 'reopen']
+    assert history['total'] == 6 and [x['action'] for x in history['items']] == ['seal', 'reopen']
     diff = s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=3&to=5')
     assert {f['field'] for f in diff['fields']} >= {'state', 'name'}
     assert diff['layers'] == []
@@ -196,7 +313,7 @@ def seal(s):
     assert attempt.returncode != 0 and b'already in use' in attempt.stderr
     s.stop()
     s.start()
-    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == current
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == winner
 
 
 def compare(s):

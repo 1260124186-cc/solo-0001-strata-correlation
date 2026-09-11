@@ -1,7 +1,6 @@
 package geology
 
 import (
-	"fmt"
 	"sort"
 )
 
@@ -33,18 +32,12 @@ func DifferenceOf(before, after Profile) (Difference, error) {
 	if before.Version >= after.Version {
 		return Difference{}, Invalid("version", "结束版本必须大于开始版本")
 	}
-	result := Difference{ProfileID: before.ID, FromVersion: before.Version, ToVersion: after.Version, Fields: []FieldChange{}, Layers: []LayerChange{}}
-	fields := []FieldChange{
-		{"name", before.Name, after.Name},
-		{"site", before.Site, after.Site},
-		{"note", before.Note, after.Note},
-		{"depth_mm", fmt.Sprint(before.DepthMM), fmt.Sprint(after.DepthMM)},
-		{"state", string(before.State), string(after.State)},
+	result := Difference{ProfileID: before.ID, FromVersion: before.Version, ToVersion: after.Version, Fields: MetadataChanges(before, after), Layers: []LayerChange{}}
+	if result.Fields == nil {
+		result.Fields = []FieldChange{}
 	}
-	for _, field := range fields {
-		if field.Before != field.After {
-			result.Fields = append(result.Fields, field)
-		}
+	if before.State != after.State {
+		result.Fields = append(result.Fields, FieldChange{"state", string(before.State), string(after.State)})
 	}
 	type span struct{ top, bottom int64 }
 	oldLayers := make(map[span]Layer)
