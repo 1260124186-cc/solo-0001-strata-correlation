@@ -87,13 +87,19 @@ func (h *Handler) replace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) coverage(w http.ResponseWriter, r *http.Request) {
-	p, err := h.service.Get(r.Context(), r.PathValue("id"))
+	q, err := query(r.URL.RawQuery, "branch")
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	p, err := h.service.Head(r.Context(), r.PathValue("id"), q.Get("branch"))
 	if err != nil {
 		h.error(w, r, err)
 		return
 	}
 	respond(w, http.StatusOK, struct {
 		Version  int              `json:"version"`
+		Branch   string           `json:"branch"`
 		Coverage geology.Coverage `json:"coverage"`
-	}{p.Version, geology.CoverageOf(p)})
+	}{p.Version, p.Branch, geology.CoverageOf(p)})
 }

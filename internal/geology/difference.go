@@ -33,6 +33,12 @@ func DifferenceOf(before, after Profile) (Difference, error) {
 	if before.Version >= after.Version {
 		return Difference{}, Invalid("version", "结束版本必须大于开始版本")
 	}
+	return ContentDifference(before, after), nil
+}
+
+// ContentDifference 比较同一剖面的任意两个版本，不再假设版本号存在先后顺序，
+// 因而可以跨分叉线比较（例如三向合并预览）。
+func ContentDifference(before, after Profile) Difference {
 	result := Difference{ProfileID: before.ID, FromVersion: before.Version, ToVersion: after.Version, Fields: []FieldChange{}, Layers: []LayerChange{}}
 	fields := []FieldChange{
 		{"name", before.Name, after.Name},
@@ -81,5 +87,5 @@ func DifferenceOf(before, after Profile) (Difference, error) {
 		}
 		return result.Layers[i].BottomMM < result.Layers[j].BottomMM
 	})
-	return result, nil
+	return result
 }

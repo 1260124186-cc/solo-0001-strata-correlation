@@ -1,13 +1,14 @@
 package api
 
 import (
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/catalog"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"net/http"
 )
 
 func (h *Handler) point(w http.ResponseWriter, r *http.Request) {
-	q, err := query(r.URL.RawQuery, "depth_mm", "version")
+	q, err := query(r.URL.RawQuery, "depth_mm", "version", "branch")
 	if err != nil {
 		h.error(w, r, err)
 		return
@@ -26,7 +27,9 @@ func (h *Handler) point(w http.ResponseWriter, r *http.Request) {
 		h.error(w, r, err)
 		return
 	}
-	result, err := h.service.Point(r.Context(), r.PathValue("id"), version, int64(depth))
+	result, err := h.service.Point(r.Context(), catalog.PointOptions{
+		ID: r.PathValue("id"), Branch: q.Get("branch"), Version: version, Depth: int64(depth),
+	})
 	if err != nil {
 		h.error(w, r, err)
 		return

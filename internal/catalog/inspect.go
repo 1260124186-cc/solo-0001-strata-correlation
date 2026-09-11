@@ -7,26 +7,41 @@ import (
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/persistence"
 )
 
-func (s *Service) Point(ctx context.Context, id string, version int, depth int64) (geology.Point, error) {
-	if version < 0 {
+// PointOptions 指定查询的修订线或具体历史版本。Version 优先于 Branch。
+type PointOptions struct {
+	ID      string
+	Branch  string
+	Version int
+	Depth   int64
+}
+
+func (s *Service) Point(ctx context.Context, opt PointOptions) (geology.Point, error) {
+	if opt.Version < 0 {
 		return geology.Point{}, geology.Invalid("version", "版本不能为负数")
 	}
+	branch, err := resolveBranch(opt.Branch)
+	if err != nil {
+		return geology.Point{}, err
+	}
 	var result geology.Point
-	err := s.repo.View(ctx, func(state persistence.State) error {
+	err = s.repo.View(ctx, func(state persistence.State) error {
 		var p geology.Profile
-		var err error
-		if version == 0 {
-			p, err = state.Latest(id)
-		} else {
-			var revision geology.Revision
-			revision, err = state.Revision(id, version)
+		if opt.Version > 0 {
+			revision, viewErr := state.Revision(opt.ID, opt.Version)
+			if viewErr != nil {
+				return viewErr
+			}
 			p = revision.Profile
+		} else {
+			head, viewErr := state.Head(opt.ID, branch)
+			if viewErr != nil {
+				return viewErr
+			}
+			p = head
 		}
-		if err != nil {
-			return err
-		}
-		result, err = geology.AtDepth(p, depth)
-		return err
+		var atErr error
+		result, atErr = geology.AtDepth(p, opt.Depth)
+		return atErr
 	})
 	return result, err
 }
@@ -52,6 +67,7 @@ func (s *Service) SuggestOffset(ctx context.Context, input correlation.OffsetReq
 	return proposal, err
 }
 
+// Difference 比较同一剖面的任意两个真实历史版本（可跨分叉线、无版本先后要求）。
 func (s *Service) Difference(ctx context.Context, id string, from, to int) (geology.Difference, error) {
 	var result geology.Difference
 	err := s.repo.View(ctx, func(state persistence.State) error {
@@ -63,8 +79,11 @@ func (s *Service) Difference(ctx context.Context, id string, from, to int) (geol
 		if err != nil {
 			return err
 		}
-		result, err = geology.DifferenceOf(a.Profile, b.Profile)
-		return err
+		if from == to {
+			return geology.Invalid("version", "必须选择两个不同的版本")
+		}
+		result = geology.ContentDifference(a.Profile, b.Profile)
+		return nil
 	})
 	return result, err
 }

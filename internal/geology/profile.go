@@ -29,6 +29,7 @@ type Profile struct {
 	Layers    []Layer   `json:"layers"`
 	State     State     `json:"state"`
 	Version   int       `json:"version"`
+	Branch    string    `json:"branch"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -87,6 +88,9 @@ func (p Profile) Validate() error {
 	}
 	if p.Version < 1 {
 		return Invalid("version", "版本必须为正整数")
+	}
+	if !ValidBranch(p.Branch) {
+		return Invalid("branch", "修订线标识无效")
 	}
 	if p.State != Draft && p.State != Sealed {
 		return Invalid("state", "未知状态")

@@ -51,6 +51,41 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 锁定成功返回版本 3。修改必须携带当前 `expected_version`；相同版本的并发请求只有一个成功，其余得到 HTTP 409。`ETag` 仅描述响应版本，写入以 JSON 中的 `expected_version` 为准。已锁定剖面需要通过 `/reopen` 重新打开，新版本不会改变历史记录。
 
+## 并行修订线：分叉与合并
+
+同一剖面现场存在两条互不相让的修订意见时，可以从**任意历史版本**分叉出并行修订线，两条线各自继续编录和锁定，互不影响。版本号在剖面内全局单调分配，不再等于历史中的位置；历史读取、差异、锁定、重新打开和深度查询都按真实版本号工作。
+
+```bash
+# 从已经锁定的历史版本 3 固定分叉点，开启一条新线
+curl -sS -X POST "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/fork" \
+  -H 'Content-Type: application/json' \
+  -d '{"source_version":3,"name":"野外补测线","reason":"现场第二意见"}'
+```
+
+响应是新版本（草拟状态，内容固定为来源版本 3），其事件 `action` 为 `fork`、`fork_point` 为 3、`branch` 为新线编号 `br_...`。之后对该线的编录、锁定、重新打开在请求体中携带 `"branch":"br_..."`；省略 `branch` 一律表示主线 `main`。分叉编号由服务生成，`name` 仅作可读标签（可空，同一剖面内不能重复）。
+
+- `GET /profiles/{id}/branches` 列出主线与全部分叉线：编号、名称、分叉点 `fork_point`、当前头版本 `head_version`。
+- `GET /profiles/{id}/branches/{branch}/relation` 查询分叉线与主线的关系：共同基点 `merge_base`、领先版本数 `ahead`、落后版本数 `behind`、是否已合并 `merged`、来源头是否锁定。
+- `GET /profiles/{id}/history` 默认按真实版本号升序返回所有修订线事件；加 `?branch=br_...` 只看一条线，`?branch=main` 只看主线。
+- `GET /profiles/{id}/at`、`/coverage` 支持 `branch` 查询参数读取线头；给 `version` 则直接读取指定历史版本，与修订线无关。`/diff?from=&to=` 可比较任意两个真实版本，允许跨线、无版本先后要求。
+
+合并回主线前先预览逐项差异，不写入任何内容：
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/merge-preview" \
+  -H 'Content-Type: application/json' -d '{"source":"br_..."}'
+```
+
+预览给出基点版本，主线、分叉线相对基点的逐项差异（字段与分层区间），以及三向合并冲突：同一字段被双方改成不同值、同一区间被双方分别修改/删除会列入 `field_conflicts` / `layer_conflicts`；只有一方修改自动采纳。无冲突时返回 200 和 `merged` 草稿，存在冲突返回 409 且 `mergeable` 为 false。
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/merge" \
+  -H 'Content-Type: application/json' \
+  -d '{"source":"br_...","expected_version":6,"expected_source_version":8,"reason":"采纳现场补测"}'
+```
+
+执行合并在**主线产生一个新版本**（草拟状态），事件 `action` 为 `merge`，并记录来源线、来源头版本和基点（`merge.source / source_version / base_version`）。合并不覆盖任何已有版本：被合并的来源版本与分叉线仍然可读，主线头需要可用 `expected_version` 乐观并发控制；主线锁定时必须先重新打开。分叉线合并后仍可继续编录并再次合并，基点会自动推进到上一次合并点。
+
 ## 对比两个锁定版本
 
 ```json
@@ -84,18 +119,23 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `PUT /profiles/{id}/layers` | `expected_version, reason, layers` 整体替换分层 |
 | `GET /profiles/{id}/coverage` | 缺口、各岩性厚度和能否锁定 |
 | `GET /profiles/{id}/at` | 必填 `depth_mm`，可选 `version`；返回所属层或缺口 |
-| `POST /profiles/{id}/seal` | `expected_version, reason`，锁定当前版本 |
-| `POST /profiles/{id}/reopen` | `expected_version, reason`，重新打开 |
-| `GET /profiles/{id}/history` | 按版本升序列出事件，支持 `offset, limit` |
+| `POST /profiles/{id}/seal` | `expected_version, reason, branch?`，锁定当前版本 |
+| `POST /profiles/{id}/reopen` | `expected_version, reason, branch?`，重新打开 |
+| `POST /profiles/{id}/fork` | `source_version, name?, reason`，从任意历史版本分叉并行修订线 |
+| `GET /profiles/{id}/branches` | 列出主线与全部分叉线、分叉点和头版本 |
+| `GET /profiles/{id}/branches/{branch}/relation` | 分叉线与主线的基点、领先/落后和合并状态 |
+| `POST /profiles/{id}/merge-preview` | `source`，三向合并逐项差异与冲突，不写入 |
+| `POST /profiles/{id}/merge` | `source, expected_version, expected_source_version?, reason`，合并产生新主线版本 |
+| `GET /profiles/{id}/history` | 按真实版本号升序列出事件，支持 `branch, offset, limit` |
 | `GET /profiles/{id}/revisions/{version}` | 指定历史版本及事件 |
-| `GET /profiles/{id}/diff` | 必填 `from, to`，查看同一剖面从旧版本到新版本的差异 |
+| `GET /profiles/{id}/diff` | 必填 `from, to`，比较同一剖面任意两个版本（可跨分叉线） |
 | `POST /comparison-offsets` | 根据共同标志层建议偏移 |
 | `POST /comparisons` | `left, right, offset_mm`，生成或复用对比 |
 | `GET /comparisons` | 可选 `profile_id, offset, limit` |
 | `GET /comparisons/{id}` | 已保存的完整对比结果 |
 | `GET /comparisons/{id}/csv` | 区间 CSV |
 
-上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
+上表只有 `/healthz` 位于前缀外。元数据、分层替换、锁定和重新打开的请求体都接受可选 `branch`（省略或 `main` 表示主线，分叉线传 `br_...`）；这些写入始终校验该修订线头版本与 `expected_version` 一致。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
 
 单个剖面最多 500 层、500 个历史版本，总深度最大 1000000 毫米。最多 2000 个剖面、10000 个对比结果，总快照上限 64 MiB。岩性支持 `sandstone / mudstone / limestone / shale / conglomerate / unknown`。名称最多 120 字、地点 200 字、说明 2000 字，单层描述 1000 字，标志层名称 80 字，修订理由 1–500 字。标志层名称在同一剖面内忽略大小写后必须唯一。
 
@@ -105,7 +145,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 数据目录保存 `strata.json` 和 `strata.lock`。每次成功写入将全部状态写到同目录临时文件，执行文件 fsync 后原子替换快照，并对目录执行 fsync。剖面、版本事件和对比结果始终处于同一状态边界；失败的校验不会修改内存或磁盘。
 
-快照包含 SHA-256 校验值。启动时检查校验值、版本连续性、状态转换及对比可重复性，遇到损坏拒绝启动。进程在替换前中断保留旧快照，替换后中断使用新快照。同目录遗留的 `.strata-*` 临时文件不会参与恢复，可在服务停止时清理。若替换后同步目录失败，服务保留新内存状态并停止后续写入，健康状态变为 503；检查磁盘并重启后再读取版本确认结果，不要盲目重放修改。
+快照包含 SHA-256 校验值。启动时检查校验值、版本唯一性、父子关系、分叉/合并事件、修订线登记及对比可重复性，遇到损坏拒绝启动。当前快照为 schema 2：事件记录所属修订线 `branch`、内容父版本 `parent`，分叉事件记录 `fork_point`，合并事件记录来源线与基点，并为每个剖面登记全部修订线及其头版本。schema 1 的旧线性快照在读取时自动解释为单一主线（补主线归属与顺序父链），旧版本号保持不变、无需重新登记；磁盘文件在下次写入时才升级为 schema 2。进程在替换前中断保留旧快照，替换后中断使用新快照。同目录遗留的 `.strata-*` 临时文件不会参与恢复，可在服务停止时清理。若替换后同步目录失败，服务保留新内存状态并停止后续写入，健康状态变为 503；检查磁盘并重启后再读取版本确认结果，不要盲目重放修改。
 
 该存储方案针对小规模资料，使用整份快照和内存副本，读写开销随历史体积增长。未实现数据删除、自动清理历史、备份轮替或多进程共享。备份时停止服务后复制数据目录；不要人工修改快照内容。
 
@@ -115,6 +155,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 go build ./...
 go vet ./...
 python3 scripts/smoke.py all
+python3 scripts/fork_merge_smoke.py
 STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 ```
 

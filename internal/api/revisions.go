@@ -47,7 +47,7 @@ func (h *Handler) revision(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) history(w http.ResponseWriter, r *http.Request) {
-	q, err := query(r.URL.RawQuery, "offset", "limit")
+	q, err := query(r.URL.RawQuery, "offset", "limit", "branch")
 	if err != nil {
 		h.error(w, r, err)
 		return
@@ -57,7 +57,7 @@ func (h *Handler) history(w http.ResponseWriter, r *http.Request) {
 		h.error(w, r, err)
 		return
 	}
-	page, err := h.service.History(r.Context(), r.PathValue("id"), offset, limit)
+	page, err := h.service.History(r.Context(), r.PathValue("id"), q.Get("branch"), offset, limit)
 	if err != nil {
 		h.error(w, r, err)
 		return
