@@ -272,6 +272,14 @@ def exchange(s):
     inspection = s.call('GET', f"/api/v1/exchange-packages/{package['package_id']}/inspect")
     assert inspection['valid'] and inspection['missing_from_service_now'] == 0
 
+    uploaded = s.call('POST', '/api/v1/exchange-packages/inspect', downloaded)
+    assert uploaded['valid'] and uploaded['package_id'] == downloaded['package_id']
+    assert uploaded['package_closure_complete'] and uploaded['service_closure_complete']
+    tampered = json.loads(json.dumps(downloaded, ensure_ascii=False))
+    tampered['payload']['histories'][0]['revisions'][0]['profile']['note'] = '篡改内容'
+    tampered_check = s.call('POST', '/api/v1/exchange-packages/inspect', tampered, 422)
+    assert not tampered_check['valid'] and any('摘要' in issue or '闭包' in issue for issue in tampered_check['issues'])
+
     state(s, a, 'reopen')
     edited_body = dict(expected_version=4, metadata=dict(name='交换北剖面修订', site=a['site'], depth_mm=a['depth_mm']), reason='对外资料修订')
     s.call('PUT', f"/api/v1/profiles/{a['id']}", edited_body)

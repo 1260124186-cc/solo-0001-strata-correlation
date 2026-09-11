@@ -161,7 +161,7 @@ func Validate(e Envelope) (bool, []string) {
 		if !reflect.DeepEqual(rebuilt.Payload.MissingReferences, e.Payload.MissingReferences) {
 			addIssue("缺失引用闭包与包内记录不一致")
 		}
-		if !reflect.DeepEqual(rebuilt.Manifest.Members, e.Manifest.Members) {
+		if !jsonEqual(rebuilt.Manifest.Members, e.Manifest.Members) {
 			addIssue("清单成员不是选择闭包的确定结果")
 		}
 	}
