@@ -213,6 +213,59 @@ def compare(s):
     assert aligned['similarity'] == 1 and aligned['overlap_mm'] == 8000
     s.call('POST', '/api/v1/comparisons', {**request, 'offset_mm': 10000}, 409)
     s.call('POST', '/api/v1/comparisons', {**request, 'left': dict(id=a['id'], version=2)}, 409)
+
+    left_layers = [
+        dict(top_mm=0, bottom_mm=2000, rock='sandstone', marker='标志A'),
+        dict(top_mm=2000, bottom_mm=4000, rock='mudstone', marker='标志B'),
+        dict(top_mm=4000, bottom_mm=6000, rock='sandstone', marker='标志C'),
+        dict(top_mm=6000, bottom_mm=8000, rock='mudstone', marker='标志D'),
+        dict(top_mm=8000, bottom_mm=10000, rock='sandstone'),
+    ]
+    right_layers = [
+        dict(top_mm=0, bottom_mm=2000, rock='sandstone', marker='标志A'),
+        dict(top_mm=2000, bottom_mm=5000, rock='mudstone', marker='标志B'),
+        dict(top_mm=5000, bottom_mm=7000, rock='sandstone', marker='标志C'),
+        dict(top_mm=7000, bottom_mm=9000, rock='mudstone', marker='标志D'),
+        dict(top_mm=9000, bottom_mm=10000, rock='sandstone'),
+    ]
+    l = state(s, replace(s, create(s, '标志层左'), left_layers), 'seal')
+    rr = state(s, replace(s, create(s, '标志层右'), right_layers), 'seal')
+    suggest_body = dict(left=dict(id=l['id'], version=3), right=dict(id=rr['id'], version=3))
+    full = s.call('POST', '/api/v1/comparison-offsets', suggest_body)
+    assert full['comparison']['offset_mm'] == -500 and full['ambiguous']
+    assert [e['marker'] for e in full['evidence']] == ['标志A', '标志B', '标志C', '标志D']
+    assert full['excluded_markers'] == [] and full['missing_markers'] == []
+    # 剔除名单：忽略大小写与首尾空白、顺序不影响身份；含找不到的名称。
+    body = dict(suggest_body, exclude_markers=[' 标志c ', '不存在', '标志D'])
+    pruned = s.call('POST', '/api/v1/comparison-offsets', body)
+    assert pruned['comparison']['offset_mm'] == 0 and not pruned['ambiguous']
+    assert pruned['comparison']['exclude_markers'] == ['不存在', '标志c', '标志d']
+    assert [e['marker'] for e in pruned['evidence']] == ['标志A', '标志B']
+    assert {e['marker'] for e in pruned['excluded_markers']} == {'标志C', '标志D'}
+    assert pruned['missing_markers'] == ['不存在']
+    pruned_cmp = s.call('POST', '/api/v1/comparisons', pruned['comparison'], 201)
+    assert [m['name'] for m in pruned_cmp['markers']] == ['标志A', '标志B']
+    assert {m['name'] for m in pruned_cmp['excluded_markers']} == {'标志C', '标志D'}
+    assert pruned_cmp['missing_markers'] == ['不存在']
+    # 建议展示的输入与正式对比完全一致：同对象复用同一结果。
+    assert s.call('POST', '/api/v1/comparisons', pruned['comparison']) == pruned_cmp
+    # 同输入、剔除名单仅大小写/空白/顺序不同，复用同一结果。
+    shuffled = dict(suggest_body, offset_mm=0, exclude_markers=['标志D', '标志C', ' 不存在 '])
+    assert s.call('POST', '/api/v1/comparisons', shuffled)['id'] == pruned_cmp['id']
+    # 有剔除但正式对比不带名单：是另一个身份，不会被静默套用剔除。
+    no_exclude = dict(suggest_body, offset_mm=0)
+    different = s.call('POST', '/api/v1/comparisons', no_exclude, 201)
+    assert different['id'] != pruned_cmp['id']
+    assert [m['name'] for m in different['markers']] == ['标志A', '标志B', '标志C', '标志D']
+    assert different['excluded_markers'] == [] and different['missing_markers'] == []
+    # 剔除全部共同标志层：建议失败，不退回到全部标志层。
+    all_excluded = dict(suggest_body, exclude_markers=['标志A', '标志B', '标志C', '标志D'])
+    s.call('POST', '/api/v1/comparison-offsets', all_excluded, 409)
+    # 剔除名单重复或空名称被拒绝。
+    s.call('POST', '/api/v1/comparison-offsets', dict(suggest_body, exclude_markers=['标志A', '标志a']), 422)
+    s.call('POST', '/api/v1/comparison-offsets', dict(suggest_body, exclude_markers=['  ']), 422)
+    s.call('POST', '/api/v1/comparisons', {**all_excluded, 'offset_mm': 0}, 201)
+
     c = state(s, replace(s, create(s, '待识别岩性'), [dict(top_mm=0, bottom_mm=10000, rock='unknown')]), 'seal')
     unknown = s.call('POST', '/api/v1/comparisons', {**request, 'right': dict(id=c['id'], version=3)}, 201)
     assert unknown['known_mm'] == 0 and unknown['similarity'] is None

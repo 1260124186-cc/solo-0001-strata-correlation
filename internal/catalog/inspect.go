@@ -32,7 +32,7 @@ func (s *Service) Point(ctx context.Context, id string, version int, depth int64
 }
 
 func (s *Service) SuggestOffset(ctx context.Context, input correlation.OffsetRequest) (correlation.OffsetProposal, error) {
-	request := correlation.Request{Left: input.Left, Right: input.Right}
+	request := correlation.Request{Left: input.Left, Right: input.Right, ExcludeMarkers: input.ExcludeMarkers}
 	if err := request.Validate(); err != nil {
 		return correlation.OffsetProposal{}, err
 	}

@@ -2,7 +2,6 @@ package correlation
 
 import (
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
-	"strings"
 	"time"
 )
 
@@ -10,6 +9,7 @@ func Align(left, right geology.Profile, request Request, now time.Time) (Result,
 	if err := request.Validate(); err != nil {
 		return Result{}, err
 	}
+	request = request.Canonicalized()
 	if err := left.Validate(); err != nil {
 		return Result{}, err
 	}
@@ -22,7 +22,7 @@ func Align(left, right geology.Profile, request Request, now time.Time) (Result,
 	if request.Left != (Reference{left.ID, left.Version}) || request.Right != (Reference{right.ID, right.Version}) {
 		return Result{}, geology.Invalid("reference", "历史版本与输入不一致")
 	}
-	result := Result{ID: request.Key(), Algorithm: Algorithm, Request: request, Segments: []Segment{}, Markers: []MarkerPair{}, CreatedAt: now}
+	result := Result{ID: request.Key(), Algorithm: Algorithm, Request: request, Segments: []Segment{}, Markers: []MarkerPair{}, ExcludedMarkers: []MarkerPair{}, MissingMarkers: []string{}, CreatedAt: now}
 	i, j := 0, 0
 	for i < len(left.Layers) && j < len(right.Layers) {
 		a, b := left.Layers[i], right.Layers[j]
@@ -58,21 +58,21 @@ func Align(left, right geology.Profile, request Request, now time.Time) (Result,
 		ratio := float64(result.EqualMM) / float64(result.KnownMM)
 		result.Similarity = &ratio
 	}
-	markers := make(map[string]geology.Layer)
-	for _, layer := range right.Layers {
-		if layer.Marker != "" {
-			markers[strings.ToLower(layer.Marker)] = layer
-		}
+	excluded := make(map[string]bool, len(request.ExcludeMarkers))
+	for _, name := range request.ExcludeMarkers {
+		excluded[name] = true
 	}
-	for _, layer := range left.Layers {
-		if layer.Marker == "" {
-			continue
-		}
-		other, exists := markers[strings.ToLower(layer.Marker)]
-		if exists {
-			rightTop := other.TopMM + request.OffsetMM
-			result.Markers = append(result.Markers, MarkerPair{layer.Marker, layer.TopMM, rightTop, rightTop - layer.TopMM})
-		}
+	used, dropped, missing := classifyMarkers(left, right, excluded)
+	toPair := func(pair commonMarker) MarkerPair {
+		rightTop := pair.rightTop + request.OffsetMM
+		return MarkerPair{Name: pair.name, LeftMM: pair.leftTop, RightMM: rightTop, DifferenceMM: rightTop - pair.leftTop}
 	}
+	for _, pair := range used {
+		result.Markers = append(result.Markers, toPair(pair))
+	}
+	for _, pair := range dropped {
+		result.ExcludedMarkers = append(result.ExcludedMarkers, toPair(pair))
+	}
+	result.MissingMarkers = missing
 	return result, nil
 }

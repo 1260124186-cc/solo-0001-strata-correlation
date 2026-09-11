@@ -57,17 +57,18 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 {
   "left": {"id": "<left-profile-id>", "version": 3},
   "right": {"id": "<right-profile-id>", "version": 3},
-  "offset_mm": -2000
+  "offset_mm": -2000,
+  "exclude_markers": ["错位标志层"]
 }
 ```
 
-将以上对象以 JSON 提交至 `POST /api/v1/comparisons`。右侧深度转换为 `右侧原深度 + offset_mm`，左侧作为共同坐标。算法合并两侧分层边界，并保留每个共同区间的岩性、厚度与 `equal / different / unknown` 关系。
+将以上对象以 JSON 提交至 `POST /api/v1/comparisons`。右侧深度转换为 `右侧原深度 + offset_mm`，左侧作为共同坐标。算法合并两侧分层边界，并保留每个共同区间的岩性、厚度与 `equal / different / unknown` 关系。`exclude_markers` 为可选的标志层名称名单（忽略大小写和首尾空白、名单顺序不影响身份），名单内的共同标志层不计入结果中的采用证据，名单中找不到共同标志层的名称列入 `missing_markers`。
 
 `similarity = equal_mm / known_mm`。未知岩性不计入 `known_mm`；全部共同区间未知时 `similarity` 为 `null`。无共同区间、非锁定输入或同一版本自身对比会被拒绝。两份不同版本可以属于同一剖面。对比结果引用**指定历史版本**，当前剖面重新打开后仍可重用旧结果。
 
-相同输入和算法版本生成同一编号，首次返回 HTTP 201，重复请求返回 HTTP 200 和原结果。交换左右或修改偏移属于不同输入。`GET /api/v1/comparisons/{id}/csv` 导出固定字段的区间 CSV，字段只包含数值、岩性代码和关系代码。
+相同输入和算法版本生成同一编号，首次返回 HTTP 201，重复请求返回 HTTP 200 和原结果。交换左右、修改偏移或修改剔除名单属于不同输入；剔除名单的大小写、首尾空白和顺序差异经规范化后视为同一输入。`GET /api/v1/comparisons/{id}/csv` 导出固定字段的区间 CSV，字段只包含数值、岩性代码和关系代码。
 
-`POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
+`POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用和可选的 `exclude_markers` 名单，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配；名单中的标志层本次不参与中位数计算，响应在 `evidence`（采用）、`excluded_markers`（剔除）和 `missing_markers`（名单中找不到共同标志层的名称）中分别列出。采用证据的各标志层所需偏移取中位数；偶数项采用中间两项平均并向零取整。剔除后若没有任何采用证据，建议直接失败（409），不会退回到使用全部标志层。响应含残差、是否存在分歧，以及可直接提交的 `comparison` 对象，其 `offset_mm` 与 `exclude_markers` 与建议展示的输入完全一致。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
 ## HTTP 接口
 
@@ -89,8 +90,8 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /profiles/{id}/history` | 按版本升序列出事件，支持 `offset, limit` |
 | `GET /profiles/{id}/revisions/{version}` | 指定历史版本及事件 |
 | `GET /profiles/{id}/diff` | 必填 `from, to`，查看同一剖面从旧版本到新版本的差异 |
-| `POST /comparison-offsets` | 根据共同标志层建议偏移 |
-| `POST /comparisons` | `left, right, offset_mm`，生成或复用对比 |
+| `POST /comparison-offsets` | `left, right, exclude_markers`，区分采用、剔除和找不到的标志层 |
+| `POST /comparisons` | `left, right, offset_mm, exclude_markers`，生成或复用对比 |
 | `GET /comparisons` | 可选 `profile_id, offset, limit` |
 | `GET /comparisons/{id}` | 已保存的完整对比结果 |
 | `GET /comparisons/{id}/csv` | 区间 CSV |

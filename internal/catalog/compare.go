@@ -20,6 +20,7 @@ func (s *Service) Compare(ctx context.Context, input correlation.Request) (corre
 	if err := input.Validate(); err != nil {
 		return correlation.Result{}, false, err
 	}
+	input = input.Canonicalized()
 	var result correlation.Result
 	reused := false
 	err := s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
