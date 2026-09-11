@@ -13,8 +13,9 @@ import (
 )
 
 type Config struct {
-	Addr            string
-	DataDir         string
+	Addr     string
+	DataDir  string
+	ReadOnly bool
 	ShutdownTimeout time.Duration
 }
 
@@ -25,12 +26,30 @@ func env(key, fallback string) string {
 	return fallback
 }
 
+func envBool(key string, fallback bool) (bool, error) {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback, fmt.Errorf("%s 必须是布尔值", key)
+	}
+	return parsed, nil
+}
+
 func Parse(args []string, output io.Writer) (Config, error) {
 	var c Config
+	readOnly, err := envBool("STRATA_READONLY", false)
+	if err != nil {
+		return c, err
+	}
 	flags := flag.NewFlagSet("stratad", flag.ContinueOnError)
 	flags.SetOutput(output)
 	flags.StringVar(&c.Addr, "addr", env("STRATA_ADDR", "127.0.0.1:8093"), "HTTP 监听地址")
 	flags.StringVar(&c.DataDir, "data", env("STRATA_DATA", "./data"), "剖面数据目录")
+	flags.BoolVar(&c.ReadOnly, "readonly", readOnly, "以只读方式打开数据目录")
+	flags.BoolVar(&c.ReadOnly, "read-only", readOnly, "以只读方式打开数据目录（同 -readonly）")
 	shutdown := flags.String("shutdown", env("STRATA_SHUTDOWN", "10s"), "优雅退出期限")
 	if err := flags.Parse(args); err != nil {
 		return c, err

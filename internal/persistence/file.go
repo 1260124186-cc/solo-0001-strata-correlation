@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,64 +13,102 @@ import (
 
 const maxSnapshot = 64 << 20
 
+var errSnapshotChangedDuringOpen = errors.New("snapshot changed during open")
+
 type envelope struct {
 	Digest string          `json:"digest"`
 	Data   json.RawMessage `json:"data"`
 }
 
-func readSnapshot(path string) (State, error) {
-	f, err := os.Open(path)
+type snapshotIdentity struct {
+	device      uint64
+	file        uint64
+	size        int64
+	modTimeNano int64
+}
+
+func readSnapshot(path string) (state State, identity snapshotIdentity, err error) {
+	for attempt := 0; attempt < 3; attempt++ {
+		state, identity, err = loadSnapshot(path)
+		if !errors.Is(err, errSnapshotChangedDuringOpen) {
+			return state, identity, err
+		}
+	}
+	return State{}, snapshotIdentity{}, err
+}
+
+func loadSnapshot(path string) (State, snapshotIdentity, error) {
+	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
-		return emptyState(), nil
+		return emptyState(), snapshotIdentity{}, nil
 	}
 	if err != nil {
-		return State{}, err
+		return State{}, snapshotIdentity{}, err
+	}
+	identity := snapshotIdentityFromInfo(info)
+	f, err := os.Open(path)
+	if err != nil {
+		return State{}, snapshotIdentity{}, err
 	}
 	defer f.Close()
+	openedInfo, err := f.Stat()
+	if err != nil {
+		return State{}, snapshotIdentity{}, err
+	}
+	if snapshotIdentityFromInfo(openedInfo) != identity {
+		return State{}, snapshotIdentity{}, errSnapshotChangedDuringOpen
+	}
 	raw, err := io.ReadAll(io.LimitReader(f, maxSnapshot+1))
 	if err != nil {
-		return State{}, err
+		return State{}, snapshotIdentity{}, err
+	}
+	finishedInfo, err := f.Stat()
+	if err != nil {
+		return State{}, snapshotIdentity{}, err
+	}
+	if snapshotIdentityFromInfo(finishedInfo) != identity {
+		return State{}, snapshotIdentity{}, errSnapshotChangedDuringOpen
 	}
 	if len(raw) > maxSnapshot {
-		return State{}, fmt.Errorf("snapshot exceeds 64 MiB")
+		return State{}, snapshotIdentity{}, fmt.Errorf("snapshot exceeds 64 MiB")
 	}
 	var env envelope
 	if err = json.Unmarshal(raw, &env); err != nil {
-		return State{}, fmt.Errorf("invalid snapshot: %w", err)
+		return State{}, snapshotIdentity{}, fmt.Errorf("invalid snapshot: %w", err)
 	}
 	sum := sha256.Sum256(env.Data)
 	if env.Digest != hex.EncodeToString(sum[:]) {
-		return State{}, fmt.Errorf("snapshot checksum mismatch")
+		return State{}, snapshotIdentity{}, fmt.Errorf("snapshot checksum mismatch")
 	}
 	var state State
 	if err = json.Unmarshal(env.Data, &state); err != nil {
-		return State{}, err
+		return State{}, snapshotIdentity{}, err
 	}
 	if err = state.Validate(); err != nil {
-		return State{}, fmt.Errorf("snapshot validation: %w", err)
+		return State{}, snapshotIdentity{}, fmt.Errorf("snapshot validation: %w", err)
 	}
-	return state, nil
+	return state, identity, nil
 }
 
 // A rename is the commit point. After it, callers must use the new state even
 // when syncing the directory reports an error.
-func writeSnapshot(path string, state State) (committed bool, err error) {
+func writeSnapshot(path string, state State) (identity snapshotIdentity, committed bool, err error) {
 	raw, err := json.Marshal(state)
 	if err != nil {
-		return false, err
+		return snapshotIdentity{}, false, err
 	}
 	sum := sha256.Sum256(raw)
 	contents, err := json.Marshal(envelope{hex.EncodeToString(sum[:]), raw})
 	if err != nil {
-		return false, err
+		return snapshotIdentity{}, false, err
 	}
 	if len(contents) > maxSnapshot {
-		return false, fmt.Errorf("snapshot capacity of 64 MiB reached")
+		return snapshotIdentity{}, false, fmt.Errorf("snapshot capacity of 64 MiB reached")
 	}
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".strata-*")
 	if err != nil {
-		return false, err
+		return snapshotIdentity{}, false, err
 	}
 	temporary := f.Name()
 	defer os.Remove(temporary)
@@ -85,18 +124,26 @@ func writeSnapshot(path string, state State) (committed bool, err error) {
 	}
 	closeErr := f.Close()
 	if err != nil {
-		return false, err
+		return snapshotIdentity{}, false, err
 	}
 	if closeErr != nil {
-		return false, closeErr
+		return snapshotIdentity{}, false, closeErr
 	}
 	if err = os.Rename(temporary, path); err != nil {
-		return false, err
+		return snapshotIdentity{}, false, err
 	}
-	d, err := os.Open(dir)
+	info, err := os.Stat(path)
 	if err != nil {
-		return true, err
+		return snapshotIdentity{}, true, err
+	}
+	identity = snapshotIdentityFromInfo(info)
+	d, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return identity, true, err
 	}
 	defer d.Close()
-	return true, d.Sync()
+	if err = d.Sync(); err != nil {
+		return identity, true, err
+	}
+	return identity, true, nil
 }

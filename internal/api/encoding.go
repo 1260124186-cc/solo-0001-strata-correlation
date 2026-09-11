@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/persistence"
 	"io"
 	"log/slog"
 	"mime"
@@ -53,6 +54,12 @@ func decodeError(err error) error {
 }
 
 func fail(w http.ResponseWriter, r *http.Request, err error, logger *slog.Logger) {
+	if errors.Is(err, persistence.ErrReadOnly) {
+		respond(w, http.StatusMethodNotAllowed, map[string]any{
+			"error": geology.Problem{Code: "read_only", Detail: "数据目录以只读方式挂载，不能执行写入操作"},
+		})
+		return
+	}
 	var problem *geology.Problem
 	if errors.As(err, &problem) {
 		status := http.StatusUnprocessableEntity

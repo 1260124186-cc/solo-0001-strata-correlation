@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,13 +10,18 @@ import (
 	"syscall"
 )
 
+var ErrReadOnly = errors.New("repository is mounted read-only")
+
 type Repository struct {
-	mu     sync.RWMutex
-	state  State
-	path   string
-	lock   *os.File
-	closed bool
-	fault  error
+	mu       sync.RWMutex
+	reloadMu sync.Mutex
+	state    State
+	path     string
+	lock     *os.File
+	identity snapshotIdentity
+	closed   bool
+	fault    error
+	readOnly bool
 }
 
 func Open(dir string) (*Repository, error) {
@@ -34,29 +40,133 @@ func Open(dir string) (*Repository, error) {
 		lock.Close()
 		return nil, fmt.Errorf("data directory is already in use: %w", err)
 	}
-	path := filepath.Join(absolute, "strata.json")
-	state, err := readSnapshot(path)
+	repo, err := openSnapshot(absolute, lock)
 	if err != nil {
 		syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 		lock.Close()
 		return nil, err
 	}
-	return &Repository{state: state, path: path, lock: lock}, nil
+	return repo, nil
+}
+
+func OpenReadOnly(dir string) (*Repository, error) {
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(absolute)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("data path is not a directory: %s", absolute)
+	}
+	repo, err := openSnapshot(absolute, nil)
+	if err != nil {
+		return nil, err
+	}
+	repo.readOnly = true
+	return repo, nil
+}
+
+func openSnapshot(dir string, lock *os.File) (*Repository, error) {
+	path := filepath.Join(dir, "strata.json")
+	state, identity, err := readSnapshot(path)
+	if err != nil {
+		return nil, err
+	}
+	return &Repository{
+		state:    state,
+		path:     path,
+		lock:     lock,
+		identity: identity,
+	}, nil
 }
 
 func (r *Repository) View(ctx context.Context, fn func(State) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	r.mu.RLock()
-	defer r.mu.RUnlock()
 	if r.closed {
+		r.mu.RUnlock()
 		return fmt.Errorf("repository closed")
+	}
+	state := r.state
+	identity := r.identity
+	readOnly := r.readOnly
+	r.mu.RUnlock()
+
+	if readOnly {
+		if err := r.refresh(identity); err != nil {
+			return err
+		}
+		r.mu.RLock()
+		if r.closed {
+			r.mu.RUnlock()
+			return fmt.Errorf("repository closed")
+		}
+		state = r.state
+		r.mu.RUnlock()
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return fn(r.state.Clone())
+	return fn(state.Clone())
+}
+
+func (r *Repository) refresh(previous snapshotIdentity) error {
+	r.reloadMu.Lock()
+	defer r.reloadMu.Unlock()
+	r.mu.RLock()
+	current := r.identity
+	closed := r.closed
+	r.mu.RUnlock()
+	if closed {
+		return fmt.Errorf("repository closed")
+	}
+	if current != previous {
+		return nil
+	}
+
+	info, err := os.Stat(r.path)
+	if os.IsNotExist(err) {
+		if previous == (snapshotIdentity{}) {
+			return nil
+		}
+		return fmt.Errorf("committed snapshot disappeared")
+	}
+	if err != nil {
+		return err
+	}
+	identity := snapshotIdentityFromInfo(info)
+	if identity == current {
+		return nil
+	}
+
+	state, loaded, err := readSnapshot(r.path)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return fmt.Errorf("repository closed")
+	}
+	if r.identity != current {
+		r.mu.Unlock()
+		return nil
+	}
+	r.state = state
+	r.identity = loaded
+	r.mu.Unlock()
+	return nil
 }
 
 func (r *Repository) Update(ctx context.Context, fn func(*State) (bool, error)) error {
+	if r.readOnly {
+		return ErrReadOnly
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
@@ -79,9 +189,12 @@ func (r *Repository) Update(ctx context.Context, fn func(*State) (bool, error)) 
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	committed, err := writeSnapshot(r.path, next)
+	identity, committed, err := writeSnapshot(r.path, next)
 	if committed {
 		r.state = next
+		if identity != (snapshotIdentity{}) {
+			r.identity = identity
+		}
 	}
 	if err != nil {
 		if committed {
@@ -94,11 +207,18 @@ func (r *Repository) Update(ctx context.Context, fn func(*State) (bool, error)) 
 
 func (r *Repository) Health() error {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if r.closed {
+	closed := r.closed
+	fault := r.fault
+	readOnly := r.readOnly
+	identity := r.identity
+	r.mu.RUnlock()
+	if closed {
 		return fmt.Errorf("repository closed")
 	}
-	return r.fault
+	if readOnly {
+		return r.refresh(identity)
+	}
+	return fault
 }
 
 func (r *Repository) Close() error {
@@ -108,6 +228,9 @@ func (r *Repository) Close() error {
 		return nil
 	}
 	r.closed = true
+	if r.lock == nil {
+		return nil
+	}
 	err := syscall.Flock(int(r.lock.Fd()), syscall.LOCK_UN)
 	closeErr := r.lock.Close()
 	if err != nil {

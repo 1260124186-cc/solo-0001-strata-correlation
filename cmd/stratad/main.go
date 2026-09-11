@@ -26,13 +26,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	repo, err := persistence.Open(c.DataDir)
+	var repo *persistence.Repository
+	if c.ReadOnly {
+		repo, err = persistence.OpenReadOnly(c.DataDir)
+	} else {
+		repo, err = persistence.Open(c.DataDir)
+	}
 	if err != nil {
 		return err
 	}
 	defer repo.Close()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	handler := api.New(catalog.New(repo), logger)
+	handler := api.New(catalog.New(repo), logger, c.ReadOnly)
 	listener, err := net.Listen("tcp", c.Addr)
 	if err != nil {
 		return err

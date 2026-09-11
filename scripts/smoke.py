@@ -11,6 +11,8 @@ import selectors
 import signal
 import subprocess
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,15 +21,18 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class Server:
-    def __init__(self, directory):
+    def __init__(self, directory, extra_args=None):
         self.directory = Path(directory)
         self.binary = self.directory / 'stratad'
+        self.extra_args = extra_args or []
         args = ['go', 'build']
         if os.environ.get('STRATA_SMOKE_RACE') == '1':
             args.append('-race')
-        subprocess.run(args + ['-o', str(self.binary), './cmd/stratad'], cwd=ROOT, check=True, timeout=60)
+        if not self.binary.exists():
+            subprocess.run(args + ['-o', str(self.binary), './cmd/stratad'], cwd=ROOT, check=True, timeout=60)
         self.process = None
-        self.log = open(self.directory / 'server.log', 'w+')
+        log_name = 'readonly.log' if '-readonly' in self.extra_args else 'server.log'
+        self.log = open(self.directory / log_name, 'w+')
         try:
             self.start()
         except BaseException:
@@ -39,7 +44,7 @@ class Server:
 
     def start(self):
         self.process = subprocess.Popen(
-            [str(self.binary), '-addr', '127.0.0.1:0', '-data', str(self.directory / 'data')],
+            [str(self.binary), '-addr', '127.0.0.1:0', '-data', str(self.directory / 'data'), *self.extra_args],
             stdout=subprocess.PIPE, stderr=self.log, text=True,
         )
         with selectors.DefaultSelector() as selector:
@@ -82,9 +87,10 @@ class Server:
             if 'DATA RACE' in content:
                 raise RuntimeError('race detector found a race')
 
-    def call(self, method, path, body=None, expected=200, raw=False):
+    def call(self, method, path, body=None, expected=200, raw=False, base=None):
+        url = (base or self.url) + path
         data = None if body is None else json.dumps(body, ensure_ascii=False).encode()
-        request = urllib.request.Request(self.url + path, data=data, method=method,
+        request = urllib.request.Request(url, data=data, method=method,
                                          headers={'Content-Type': 'application/json'})
         try:
             response = urllib.request.urlopen(request, timeout=10)
@@ -243,11 +249,70 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def readonly(s):
+    p = sealed(s, '只读共享剖面')
+    original = s.call('GET', f'/api/v1/profiles/{p["id"]}')
+    reader = Server(s.directory, ['-readonly'])
+    observed = []
+    follow_error = None
+    stop = threading.Event()
+
+    def follow():
+        nonlocal follow_error
+        try:
+            while not stop.is_set():
+                current = s.call('GET', f'/api/v1/profiles/{p["id"]}', base=reader.url)
+                assert current['version'] in range(3, 7)
+                assert len(current['layers']) == 2
+                assert current['state'] in ('draft', 'sealed')
+                observed.append(current)
+        except BaseException as exc:
+            follow_error = exc
+
+    thread = threading.Thread(target=follow)
+    thread.start()
+    try:
+        assert s.call('GET', f'/api/v1/profiles/{p["id"]}', base=reader.url) == original
+        denied = s.call('POST', '/api/v1/profiles',
+                        dict(name='只读写入', site='地点', depth_mm=10, note=''),
+                        expected=405, base=reader.url)
+        assert denied['error']['code'] == 'read_only'
+
+        p = state(s, p, 'reopen')
+        body = dict(expected_version=p['version'],
+                    metadata=dict(name='只读共享剖面-修订', site=p['site'], depth_mm=p['depth_mm']),
+                    reason='只读挂载期间修订')
+        p = s.call('PUT', f'/api/v1/profiles/{p["id"]}', body)
+        p = state(s, p, 'seal')
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            current = s.call('GET', f'/api/v1/profiles/{p["id"]}', base=reader.url)
+            if current == p:
+                break
+            time.sleep(0.02)
+        assert current == p
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        if follow_error is not None:
+            raise follow_error
+        reader.close()
+
+    versions = {item['version'] for item in observed}
+    assert versions and max(versions) == 6
+    another = subprocess.run(
+        [str(s.binary), '-addr', '127.0.0.1:0', '-data', str(s.directory/'data')],
+        capture_output=True, timeout=10,
+    )
+    assert another.returncode != 0 and b'already in use' in another.stderr
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'readonly', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'readonly'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)
