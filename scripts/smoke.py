@@ -3,6 +3,7 @@
 import argparse
 import concurrent.futures
 import csv
+import hashlib
 import io
 import json
 import os
@@ -243,11 +244,79 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def v1_state(pid):
+    created, updated = '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z'
+    base = dict(id=pid, name='旧格式剖面', site='旧址', depth_mm=10000, note='旧快照',
+                state='draft', created_at=created)
+    first = dict(base, layers=[], version=1, updated_at=created)
+    second = dict(base, version=2, updated_at=updated,
+                  layers=[dict(top_mm=0, bottom_mm=10000, rock='sandstone', description='', marker='')])
+    return dict(schema=1, histories={pid: [
+        dict(profile=first, event=dict(action='create', reason='新建剖面', version=1, at=created)),
+        dict(profile=second, event=dict(action='layers', reason='补充分层', version=2, at=updated)),
+    ]}, comparisons={})
+
+
+def write_snapshot(s, state, extra_envelope=None):
+    payload = json.dumps(state, ensure_ascii=False)
+    envelope = dict(digest=hashlib.sha256(payload.encode()).hexdigest(), data=state)
+    if extra_envelope:
+        envelope.update(extra_envelope)
+    data = s.directory / 'data'
+    data.mkdir(exist_ok=True)
+    (data / 'strata.json').write_text(json.dumps(envelope, ensure_ascii=False))
+
+
+def refuse_start(s, message):
+    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(s.directory / 'data')],
+                             capture_output=True, timeout=10)
+    assert attempt.returncode != 0 and message.encode() in attempt.stderr, attempt.stderr.decode()
+
+
+def migrate(s):
+    pid = 'prf_' + 'f' * 32
+    s.stop()
+    write_snapshot(s, v1_state(pid))
+    s.start()
+    current = s.call('GET', f'/api/v1/profiles/{pid}')
+    assert current['version'] == 2 and current['source'] == '' and current['layers'][0]['rock'] == 'sandstone'
+    history = s.call('GET', f'/api/v1/profiles/{pid}/history')
+    assert history['total'] == 2 and [e['action'] for e in history['items']] == ['create', 'layers']
+    s.stop()
+    saved = json.loads((s.directory / 'data' / 'strata.json').read_text())
+    assert saved['data']['schema'] == 1
+    s.start()
+    body = dict(expected_version=2, reason='补充资料来源',
+                metadata=dict(name='旧格式剖面', site='旧址', depth_mm=10000, note='旧快照', source='野外实测'))
+    updated = s.call('PUT', f'/api/v1/profiles/{pid}', body)
+    assert updated['version'] == 3 and updated['source'] == '野外实测'
+    s.stop()
+    saved = json.loads((s.directory / 'data' / 'strata.json').read_text())
+    assert saved['data']['schema'] == 2
+    revisions = saved['data']['histories'][pid]
+    assert [r['profile']['source'] for r in revisions] == ['', '', '野外实测']
+    s.start()
+    assert s.call('GET', f'/api/v1/profiles/{pid}')['source'] == '野外实测'
+    s.stop()
+    write_snapshot(s, dict(v1_state(pid), schema=3))
+    refuse_start(s, 'unsupported snapshot schema')
+    forged = v1_state(pid)
+    forged['histories'][pid][0]['profile']['source'] = '混入字段'
+    write_snapshot(s, forged)
+    refuse_start(s, 'invalid schema 1 snapshot')
+    upgraded = json.loads(json.dumps(saved['data']))
+    upgraded['histories'][pid][0]['profile']['unexpected'] = True
+    write_snapshot(s, upgraded)
+    refuse_start(s, 'invalid schema 2 snapshot')
+    write_snapshot(s, saved['data'], extra_envelope=dict(extra=1))
+    refuse_start(s, 'invalid snapshot:')
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'migrate', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'migrate'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

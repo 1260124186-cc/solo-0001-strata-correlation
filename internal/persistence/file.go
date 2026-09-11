@@ -34,15 +34,15 @@ func readSnapshot(path string) (State, error) {
 		return State{}, fmt.Errorf("snapshot exceeds 64 MiB")
 	}
 	var env envelope
-	if err = json.Unmarshal(raw, &env); err != nil {
+	if err = decodeStrict(raw, &env); err != nil {
 		return State{}, fmt.Errorf("invalid snapshot: %w", err)
 	}
 	sum := sha256.Sum256(env.Data)
 	if env.Digest != hex.EncodeToString(sum[:]) {
 		return State{}, fmt.Errorf("snapshot checksum mismatch")
 	}
-	var state State
-	if err = json.Unmarshal(env.Data, &state); err != nil {
+	state, err := decodeState(env.Data)
+	if err != nil {
 		return State{}, err
 	}
 	if err = state.Validate(); err != nil {

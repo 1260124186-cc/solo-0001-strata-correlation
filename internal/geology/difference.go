@@ -38,6 +38,7 @@ func DifferenceOf(before, after Profile) (Difference, error) {
 		{"name", before.Name, after.Name},
 		{"site", before.Site, after.Site},
 		{"note", before.Note, after.Note},
+		{"source", before.Source, after.Source},
 		{"depth_mm", fmt.Sprint(before.DepthMM), fmt.Sprint(after.DepthMM)},
 		{"state", string(before.State), string(after.State)},
 	}

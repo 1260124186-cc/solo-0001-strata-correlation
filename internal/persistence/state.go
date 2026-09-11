@@ -8,6 +8,11 @@ import (
 	"reflect"
 )
 
+// currentSchema is the only snapshot layout this service writes. Schema 1
+// snapshots (profiles without a source field) are still read and migrated on
+// load; see migrate.go.
+const currentSchema = 2
+
 type State struct {
 	Schema      int                           `json:"schema"`
 	Histories   map[string][]geology.Revision `json:"histories"`
@@ -15,7 +20,7 @@ type State struct {
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{Schema: currentSchema, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
 }
 
 func (s State) Clone() State {
@@ -53,7 +58,7 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 }
 
 func (s State) Validate() error {
-	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
+	if s.Schema != currentSchema || s.Histories == nil || s.Comparisons == nil {
 		return fmt.Errorf("unsupported snapshot shape")
 	}
 	for id, history := range s.Histories {
