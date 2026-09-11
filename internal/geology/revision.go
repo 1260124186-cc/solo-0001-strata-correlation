@@ -39,12 +39,12 @@ func ChangeState(p Profile, target State, expected int, reason string, now time.
 	if p.State == target {
 		return Revision{}, Conflict("剖面已经处于目标状态")
 	}
-	action := "reopen"
+	action := ActionReopen
 	if target == Sealed {
 		if !CoverageOf(p).Ready {
 			return Revision{}, Conflict("分层存在深度缺口，不能锁定")
 		}
-		action = "seal"
+		action = ActionSeal
 	} else if target != Draft {
 		return Revision{}, Invalid("state", "不支持的状态")
 	}

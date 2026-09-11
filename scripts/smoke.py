@@ -189,6 +189,27 @@ def seal(s):
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/3') == locked
     history = s.call('GET', f'/api/v1/profiles/{p["id"]}/history?offset=2&limit=2')
     assert history['total'] == 5 and [x['action'] for x in history['items']] == ['seal', 'reopen']
+    full = s.call('GET', f'/api/v1/profiles/{p["id"]}/history')
+    assert full['total'] == 5 and [x['version'] for x in full['items']] == [1, 2, 3, 4, 5]
+    only = s.call('GET', f'/api/v1/profiles/{p["id"]}/history?action=seal')
+    assert only['total'] == 1 and only['items'][0]['version'] == 3
+    window = s.call('GET', f'/api/v1/profiles/{p["id"]}/history?from_version=2&to_version=3')
+    assert window['total'] == 2 and [x['version'] for x in window['items']] == [2, 3]
+    events = full['items']
+    q = urllib.parse.urlencode(dict(since=events[1]['at'], until=events[3]['at']))
+    ranged = s.call('GET', f'/api/v1/profiles/{p["id"]}/history?{q}')
+    lo, hi = 1, 3
+    while lo > 0 and events[lo - 1]['at'] == events[1]['at']:
+        lo -= 1
+    while hi + 1 < len(events) and events[hi + 1]['at'] == events[3]['at']:
+        hi += 1
+    assert ranged['items'] == events[lo:hi + 1] and ranged['total'] == hi + 1 - lo
+    empty = s.call('GET', f'/api/v1/profiles/{p["id"]}/history?action=seal&from_version=4')
+    assert empty['total'] == 0 and empty['items'] == []
+    for bad in ['action=purge', 'since=not-a-time', 'until=2026-09-11',
+                'since=2026-09-11T10:00:00Z&until=2026-09-11T09:00:00Z',
+                'from_version=4&to_version=2', 'from_version=0', 'to_version=501', 'bogus=1']:
+        s.call('GET', f'/api/v1/profiles/{p["id"]}/history?{bad}', expected=422)
     diff = s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=3&to=5')
     assert {f['field'] for f in diff['fields']} >= {'state', 'name'}
     assert diff['layers'] == []
@@ -197,6 +218,18 @@ def seal(s):
     s.stop()
     s.start()
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == current
+    first = s.call('GET', f'/api/v1/profiles/{p["id"]}/history?offset=0&limit=2')
+    body = dict(expected_version=current['version'], reason='翻页期间写入新修订',
+                metadata=dict(name=current['name'], site=current['site'],
+                              depth_mm=current['depth_mm'], note=current['note']))
+    current = s.call('PUT', f'/api/v1/profiles/{p["id"]}', body)
+    assert current['version'] == 6
+    second = s.call('GET', f'/api/v1/profiles/{p["id"]}/history?offset=2&limit=2')
+    third = s.call('GET', f'/api/v1/profiles/{p["id"]}/history?offset=4&limit=2')
+    seen = first['items'] + second['items'] + third['items']
+    assert [x['version'] for x in seen] == [1, 2, 3, 4, 5, 6]
+    meta = s.call('GET', f'/api/v1/profiles/{p["id"]}/history?action=metadata')
+    assert meta['total'] == 2 and [x['version'] for x in meta['items']] == [5, 6]
 
 
 def compare(s):

@@ -44,7 +44,7 @@ func (s *Service) Edit(ctx context.Context, id string, input EditMetadata) (geol
 		p.Metadata = metadata
 		p.Version++
 		p.UpdatedAt = nextTime(p.UpdatedAt)
-		revision := geology.Revision{Profile: p, Event: geology.Event{Action: "metadata", Reason: reason, Version: p.Version, At: p.UpdatedAt}}
+		revision := geology.Revision{Profile: p, Event: geology.Event{Action: geology.ActionMetadata, Reason: reason, Version: p.Version, At: p.UpdatedAt}}
 		if err = appendRevision(state, revision); err != nil {
 			return false, err
 		}
@@ -78,7 +78,7 @@ func (s *Service) Replace(ctx context.Context, id string, input ReplaceLayers) (
 		p.Layers = layers
 		p.Version++
 		p.UpdatedAt = nextTime(p.UpdatedAt)
-		revision := geology.Revision{Profile: p, Event: geology.Event{Action: "layers", Reason: reason, Version: p.Version, At: p.UpdatedAt}}
+		revision := geology.Revision{Profile: p, Event: geology.Event{Action: geology.ActionLayers, Reason: reason, Version: p.Version, At: p.UpdatedAt}}
 		if err = appendRevision(state, revision); err != nil {
 			return false, err
 		}

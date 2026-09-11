@@ -71,7 +71,7 @@ func (s State) Validate() error {
 				return err
 			}
 			if i == 0 {
-				if r.Event.Action != "create" || r.Profile.State != geology.Draft {
+				if r.Event.Action != geology.ActionCreate || r.Profile.State != geology.Draft {
 					return fmt.Errorf("invalid initial revision")
 				}
 			} else {
@@ -113,19 +113,19 @@ func (s State) Validate() error {
 func validateStep(before geology.Profile, r geology.Revision) error {
 	after := r.Profile
 	switch r.Event.Action {
-	case "metadata", "layers":
+	case geology.ActionMetadata, geology.ActionLayers:
 		if before.State != geology.Draft || after.State != geology.Draft {
 			return fmt.Errorf("edited sealed revision")
 		}
-		if r.Event.Action == "layers" && before.Metadata != after.Metadata {
+		if r.Event.Action == geology.ActionLayers && before.Metadata != after.Metadata {
 			return fmt.Errorf("layers edit changed metadata")
 		}
-		if r.Event.Action == "metadata" && !reflect.DeepEqual(before.Layers, after.Layers) {
+		if r.Event.Action == geology.ActionMetadata && !reflect.DeepEqual(before.Layers, after.Layers) {
 			return fmt.Errorf("metadata edit changed layers")
 		}
-	case "seal", "reopen":
+	case geology.ActionSeal, geology.ActionReopen:
 		expected := geology.Sealed
-		if r.Event.Action == "reopen" {
+		if r.Event.Action == geology.ActionReopen {
 			expected = geology.Draft
 		}
 		if after.State != expected || before.State == expected || before.Metadata != after.Metadata || !reflect.DeepEqual(before.Layers, after.Layers) {

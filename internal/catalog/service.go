@@ -48,7 +48,7 @@ func (s *Service) Create(ctx context.Context, metadata geology.Metadata) (geolog
 		if _, exists := state.Histories[id]; exists {
 			return false, geology.Conflict("剖面编号重复，请重试")
 		}
-		state.Histories[id] = []geology.Revision{{Profile: p, Event: geology.Event{Action: "create", Reason: "新建剖面", Version: 1, At: now}}}
+		state.Histories[id] = []geology.Revision{{Profile: p, Event: geology.Event{Action: geology.ActionCreate, Reason: "新建剖面", Version: 1, At: now}}}
 		return true, nil
 	})
 	return p, err

@@ -47,17 +47,17 @@ func (h *Handler) revision(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) history(w http.ResponseWriter, r *http.Request) {
-	q, err := query(r.URL.RawQuery, "offset", "limit")
+	q, err := query(r.URL.RawQuery, "offset", "limit", "action", "since", "until", "from_version", "to_version")
 	if err != nil {
 		h.error(w, r, err)
 		return
 	}
-	offset, limit, err := pagination(q)
+	f, err := historyFilter(q)
 	if err != nil {
 		h.error(w, r, err)
 		return
 	}
-	page, err := h.service.History(r.Context(), r.PathValue("id"), offset, limit)
+	page, err := h.service.History(r.Context(), r.PathValue("id"), f)
 	if err != nil {
 		h.error(w, r, err)
 		return

@@ -86,7 +86,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /profiles/{id}/at` | 必填 `depth_mm`，可选 `version`；返回所属层或缺口 |
 | `POST /profiles/{id}/seal` | `expected_version, reason`，锁定当前版本 |
 | `POST /profiles/{id}/reopen` | `expected_version, reason`，重新打开 |
-| `GET /profiles/{id}/history` | 按版本升序列出事件，支持 `offset, limit` |
+| `GET /profiles/{id}/history` | 按版本升序列出事件，支持 `action, since, until, from_version, to_version, offset, limit` |
 | `GET /profiles/{id}/revisions/{version}` | 指定历史版本及事件 |
 | `GET /profiles/{id}/diff` | 必填 `from, to`，查看同一剖面从旧版本到新版本的差异 |
 | `POST /comparison-offsets` | 根据共同标志层建议偏移 |
@@ -96,6 +96,8 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /comparisons/{id}/csv` | 区间 CSV |
 
 上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
+
+历史查询的过滤条件在分页之前生效：`action` 限定操作类型（`create / metadata / layers / seal / reopen`），`since` 和 `until` 按事件时间过滤（RFC 3339 格式，闭区间），`from_version` 和 `to_version` 按版本号过滤（闭区间）。省略全部条件时返回完整历史。响应中的 `total` 是过滤后的总数，事件版本始终是原始修订号，不因筛选重新排序或编号。历史只能追加且按版本升序返回，顺序固定，因此同一查询连续翻页时，即使翻页期间写入了新修订，已读页也不会重复或遗漏事件；新事件只追加在末尾，`total` 相应增长。非法操作类型、无法解析的时间、起点大于终点的范围都返回 422。
 
 单个剖面最多 500 层、500 个历史版本，总深度最大 1000000 毫米。最多 2000 个剖面、10000 个对比结果，总快照上限 64 MiB。岩性支持 `sandstone / mudstone / limestone / shale / conglomerate / unknown`。名称最多 120 字、地点 200 字、说明 2000 字，单层描述 1000 字，标志层名称 80 字，修订理由 1–500 字。标志层名称在同一剖面内忽略大小写后必须唯一。
 
@@ -120,7 +122,7 @@ STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 
 **测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、历史过滤与翻页稳定性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
 
 ## 目录
 
