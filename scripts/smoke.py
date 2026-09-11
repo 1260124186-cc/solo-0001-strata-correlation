@@ -223,6 +223,86 @@ def compare(s):
     assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
 
 
+def derive(s):
+    src = create(s, '派生来源剖面')
+    src = replace(s, src, [dict(top_mm=0, bottom_mm=3000, rock='sandstone', marker='底部标志'),
+                           dict(top_mm=3000, bottom_mm=6000, rock='mudstone', marker=''),
+                           dict(top_mm=6000, bottom_mm=10000, rock='limestone', marker='顶部标志')])
+    src = state(s, src, 'seal')
+    assert src['version'] == 3
+
+    def preview(top, bottom, version=3, expected=200):
+        return s.call('POST', '/api/v1/derivations/preview',
+                      dict(source_id=src['id'], source_version=version, top_mm=top, bottom_mm=bottom), expected)
+
+    p1 = preview(2000, 8000)
+    assert p1['depth_mm'] == 6000 and p1['expected_source_version'] == 3
+    assert p1['layers'] == [dict(top_mm=0, bottom_mm=1000, rock='sandstone', description='', marker=''),
+                           dict(top_mm=1000, bottom_mm=4000, rock='mudstone', description='', marker=''),
+                           dict(top_mm=4000, bottom_mm=6000, rock='limestone', description='', marker='')]
+    assert p1['markers'] == [] and p1['coverage']['covered_mm'] == 6000 and p1['coverage']['gaps'] == []
+    p2 = preview(0, 6000)
+    assert p2['markers'] == ['底部标志'] and p2['layers'][0]['marker'] == '底部标志'
+    p3 = preview(3000, 10000)
+    assert p3['markers'] == ['顶部标志'] and p3['layers'][1]['marker'] == '顶部标志'
+    preview(5000, 5000, expected=422)
+    preview(9000, 11000, expected=422)
+    preview(0, 5000, version=99, expected=404)
+    preview(0, 5000, version=2, expected=409)
+    s.call('GET', f'/api/v1/profiles/{src["id"]}/derivation', expected=404)
+
+    def confirm(top, bottom, expected_version, name='派生草拟剖面', expected=201):
+        return s.call('POST', '/api/v1/derivations',
+                      dict(source_id=src['id'], source_version=3, top_mm=top, bottom_mm=bottom,
+                           expected_source_version=expected_version, name=name, site='赤石岭',
+                           note='独立编录起点', reason='截取目标层段'), expected)
+
+    created = confirm(2000, 8000, 3)
+    child = created['profile']
+    assert child['version'] == 1 and child['state'] == 'draft' and child['depth_mm'] == 6000
+    assert child['layers'] == p1['layers']
+    d = created['derivation']
+    assert d['derived_id'] == child['id'] and d['source_id'] == src['id']
+    assert (d['source_version'], d['top_mm'], d['bottom_mm']) == (3, 2000, 8000)
+    coverage = s.call('GET', f'/api/v1/profiles/{child["id"]}/coverage')['coverage']
+    assert coverage['covered_mm'] == 6000 and coverage['gaps'] == []
+    assert s.call('GET', f'/api/v1/profiles/{child["id"]}/derivation') == d
+    assert s.call('GET', f'/api/v1/profiles/{child["id"]}/lineage')['items'] == [d]
+    confirm(0, 1000, 0, expected=422)
+
+    reopened = state(s, src, 'reopen')
+    assert reopened['version'] == 4
+    stale = confirm(2000, 8000, 3, expected=409)
+    assert '前提' in stale['error']['detail']
+    again = preview(2000, 8000)
+    assert again['expected_source_version'] == 4 and again['layers'] == p1['layers']
+    second = confirm(2000, 8000, 4, name='第二份派生')
+    assert second['profile']['id'] != child['id']
+
+    child = state(s, child, 'seal')
+    assert child['version'] == 2
+    proposal = s.call('POST', '/api/v1/derivations/preview',
+                      dict(source_id=child['id'], source_version=2, top_mm=1000, bottom_mm=5000))
+    assert proposal['expected_source_version'] == 2
+    grand = s.call('POST', '/api/v1/derivations',
+                   dict(source_id=child['id'], source_version=2, top_mm=1000, bottom_mm=5000,
+                        expected_source_version=2, name='孙代剖面', site='赤石岭', note='',
+                        reason='继续派生'), 201)['profile']
+    assert grand['depth_mm'] == 4000
+    lineage = s.call('GET', f'/api/v1/profiles/{grand["id"]}/lineage')
+    assert [x['derived_id'] for x in lineage['items']] == [grand['id'], child['id']]
+    assert [x['source_id'] for x in lineage['items']] == [child['id'], src['id']]
+    assert s.call('GET', f'/api/v1/profiles/{src["id"]}/lineage')['items'] == []
+
+    revised = state(s, replace(s, reopened, layers()), 'seal')
+    assert revised['version'] == 6
+    assert s.call('GET', f'/api/v1/profiles/{child["id"]}/derivation') == d
+    s.stop()
+    s.start()
+    assert s.call('GET', f'/api/v1/profiles/{child["id"]}/derivation') == d
+    assert s.call('GET', f'/api/v1/profiles/{grand["id"]}/lineage') == lineage
+
+
 def browse(s):
     a = sealed(s, '赤石北剖面')
     b = create(s, '赤石南剖面')
@@ -245,9 +325,9 @@ def browse(s):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'derive', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'derive'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

@@ -12,10 +12,11 @@ type State struct {
 	Schema      int                           `json:"schema"`
 	Histories   map[string][]geology.Revision `json:"histories"`
 	Comparisons map[string]correlation.Result `json:"comparisons"`
+	Derivations map[string]geology.Derivation `json:"derivations"`
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}, Derivations: map[string]geology.Derivation{}}
 }
 
 func (s State) Clone() State {
@@ -29,6 +30,9 @@ func (s State) Clone() State {
 	}
 	for id, result := range s.Comparisons {
 		out.Comparisons[id] = result.Clone()
+	}
+	for id, derivation := range s.Derivations {
+		out.Derivations[id] = derivation
 	}
 	return out
 }
@@ -53,7 +57,7 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 }
 
 func (s State) Validate() error {
-	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
+	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil || s.Derivations == nil {
 		return fmt.Errorf("unsupported snapshot shape")
 	}
 	for id, history := range s.Histories {
@@ -105,6 +109,39 @@ func (s State) Validate() error {
 		actual, _ := json.Marshal(result)
 		if string(expected) != string(actual) {
 			return fmt.Errorf("comparison data mismatch")
+		}
+	}
+	for id, d := range s.Derivations {
+		if !geology.ValidID(id, "prf_") || d.DerivedID != id || !geology.ValidID(d.SourceID, "prf_") || d.CreatedAt.IsZero() {
+			return fmt.Errorf("invalid derivation identity")
+		}
+		derived, ok := s.Histories[id]
+		if !ok || len(derived) == 0 {
+			return fmt.Errorf("derivation target missing")
+		}
+		source, err := s.Revision(d.SourceID, d.SourceVersion)
+		if err != nil {
+			return err
+		}
+		if source.Profile.State != geology.Sealed {
+			return fmt.Errorf("derivation source is not sealed")
+		}
+		if d.TopMM < 0 || d.BottomMM > source.Profile.DepthMM || d.TopMM >= d.BottomMM {
+			return fmt.Errorf("invalid derivation range")
+		}
+		origin := derived[0].Profile
+		if origin.DepthMM != d.BottomMM-d.TopMM {
+			return fmt.Errorf("derivation depth mismatch")
+		}
+		layers, err := geology.Crop(source.Profile, d.TopMM, d.BottomMM)
+		if err != nil {
+			return err
+		}
+		if !reflect.DeepEqual(layers, origin.Layers) {
+			return fmt.Errorf("derivation content mismatch")
+		}
+		if err := geology.CheckDerivationLink(s.Derivations, id, d.SourceID); err != nil {
+			return fmt.Errorf("derivation cycle: %w", err)
 		}
 	}
 	return nil

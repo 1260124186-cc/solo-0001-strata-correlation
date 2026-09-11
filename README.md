@@ -69,6 +69,25 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 `POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
+## 派生剖面
+
+锁定历史版本的某段深度可以截取为新的独立编录起点，派生物锁定后还能继续被派生。分两步：先 `POST /api/v1/derivations/preview` 预览裁剪结果，再 `POST /api/v1/derivations` 确认创建。
+
+```json
+{
+  "source_id": "<profile-id>",
+  "source_version": 3,
+  "top_mm": 2000,
+  "bottom_mm": 8000
+}
+```
+
+预览返回裁剪后的分层、深度、覆盖统计、带入的标志层，以及 `expected_source_version`（来源剖面当前版本）。确认请求必须原样回传该值；预览之后来源剖面被重新打开或产生新版本时，确认返回 HTTP 409 并说明前提已变化，需要重新预览。确认不会悄悄改用最新内容：裁剪始终基于指定的锁定历史版本，由服务器重新计算。
+
+裁剪规则：边界穿过的分层按交集截断，厚度正确拆分并平移到以区间起点为零点；标志层仅在所属分层完整落入所选区间时带入，被截断的分层不携带标志层；来源区间内的覆盖缺口原样保留，派生物的覆盖统计与来源区间的覆盖长度一致。新剖面为草拟状态，总深度等于区间长度，元数据（`name, site, note`）由确认请求提供。
+
+确认同时保存不可变的派生记录（来源版本与原始区间），与剖面历史原子写入。`GET /profiles/{id}/derivation` 读取该剖面的直接派生记录，`GET /profiles/{id}/lineage` 沿派生记录逐级列出完整来源链。会使一份剖面成为其自身祖先的派生被拒绝；来源剖面的后续修订不会改写已保存的派生关系。
+
 ## HTTP 接口
 
 接口统一前缀 `/api/v1`，请求体类型 `application/json`，最大 4 MiB；拒绝未知 JSON 字段及多个连续 JSON 对象。应用错误采用 `{"error":{"code":"invalid","field":"depth_mm","detail":"..."}}`。HTTP 422 表示字段错误，409 表示状态或版本冲突，404 表示资源缺失，415 表示请求类型错误，413 表示体积超限，500 表示内部故障。不存在的路由和不支持的方法使用 Go HTTP 的 404/405 响应。
@@ -89,6 +108,10 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /profiles/{id}/history` | 按版本升序列出事件，支持 `offset, limit` |
 | `GET /profiles/{id}/revisions/{version}` | 指定历史版本及事件 |
 | `GET /profiles/{id}/diff` | 必填 `from, to`，查看同一剖面从旧版本到新版本的差异 |
+| `POST /derivations/preview` | `source_id, source_version, top_mm, bottom_mm` 预览裁剪结果 |
+| `POST /derivations` | 预览字段 + `expected_source_version, name, site, note, reason` 确认派生 |
+| `GET /profiles/{id}/derivation` | 该剖面的派生记录，非派生物为 404 |
+| `GET /profiles/{id}/lineage` | 从直接来源逐级向上的完整来源链 |
 | `POST /comparison-offsets` | 根据共同标志层建议偏移 |
 | `POST /comparisons` | `left, right, offset_mm`，生成或复用对比 |
 | `GET /comparisons` | 可选 `profile_id, offset, limit` |
@@ -118,9 +141,9 @@ python3 scripts/smoke.py all
 STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 ```
 
-**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
+**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse / derive` 五个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页、剖面派生的预览确认与来源链。
 
 ## 目录
 
