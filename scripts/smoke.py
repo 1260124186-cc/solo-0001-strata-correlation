@@ -243,11 +243,68 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def exchange(s):
+    a, b = sealed(s, '交换北剖面'), sealed(s, '交换南剖面')
+    request = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
+    comparison = s.call('POST', '/api/v1/comparisons', request, 201)
+    c = sealed(s, '交换关联剖面', 6000)
+    linked = s.call('POST', '/api/v1/comparisons',
+                    dict(left=dict(id=a['id'], version=3), right=dict(id=c['id'], version=3), offset_mm=0), 201)
+    selections = [dict(type='profile_revision', id=a['id'], version=3)]
+    package = s.call('POST', '/api/v1/exchange-packages', dict(selections=selections), 201)
+    s.call('POST', '/api/v1/exchange-packages',
+           dict(selections=[dict(type='profile_revision', id=a['id'], version=2)]), 422)
+    assert package['complete'] and package['status'] == 'complete'
+    assert package['summary']['history_count'] == 3 and package['summary']['comparison_count'] == 2
+    member_ids = [(m['kind'], m['id']) for m in package['manifest']['members']]
+    order = {'profile_history': 1, 'comparison': 2}
+    assert member_ids == sorted(member_ids, key=lambda item: (order[item[0]], item[1]))
+    kinds = {kind for kind, _ in member_ids}
+    assert kinds == {'profile_history', 'comparison'}
+    comparison_ids = [id_ for kind, id_ in member_ids if kind == 'comparison']
+    assert comparison['id'] in comparison_ids and linked['id'] in comparison_ids
+    duplicate = s.call('POST', '/api/v1/exchange-packages', dict(selections=list(reversed(selections))))
+    assert duplicate['package_id'] == package['package_id']
+    downloaded = json.loads(s.call('GET', f"/api/v1/exchange-packages/{package['package_id']}/download", raw=True))
+    assert downloaded['package_id'] == package['package_id'] and downloaded['payload']['selections'] == selections
+    assert {h['profile_id'] for h in downloaded['payload']['histories']} == {a['id'], b['id'], c['id']}
+    assert all(h['revisions'][2]['profile']['state'] == 'sealed' for h in downloaded['payload']['histories'])
+    inspection = s.call('GET', f"/api/v1/exchange-packages/{package['package_id']}/inspect")
+    assert inspection['valid'] and inspection['missing_from_service_now'] == 0
+
+    state(s, a, 'reopen')
+    edited_body = dict(expected_version=4, metadata=dict(name='交换北剖面修订', site=a['site'], depth_mm=a['depth_mm']), reason='对外资料修订')
+    s.call('PUT', f"/api/v1/profiles/{a['id']}", edited_body)
+    redownloaded = json.loads(s.call('GET', f"/api/v1/exchange-packages/{package['package_id']}/download", raw=True))
+    assert redownloaded == downloaded
+    inspection = s.call('GET', f"/api/v1/exchange-packages/{package['package_id']}/inspect")
+    statuses = {(m['kind'], m['id'], m['version']): m['service_status'] for m in inspection['members']}
+    assert statuses[('profile_revision', a['id'], 3)] == 'present'
+    assert statuses[('profile_history', a['id'], 0)] == 'changed_in_service'
+    assert statuses[('comparison', comparison['id'], 0)] == 'present'
+    assert inspection['changed_in_service'] >= 1
+
+    missing_cmp = 'cmp_' + '0' * 32
+    incomplete = s.call('POST', '/api/v1/exchange-packages',
+                        dict(selections=[dict(type='comparison', id=missing_cmp)]), 201)
+    assert incomplete['status'] == 'incomplete' and incomplete['missing_references'][0]['id'] == missing_cmp
+    missing_inspection = s.call('GET', f"/api/v1/exchange-packages/{incomplete['package_id']}/inspect")
+    assert missing_inspection['valid'] and not missing_inspection['complete']
+    assert missing_inspection['missing_references'][0]['status'] == 'missing_in_package_and_service'
+    assert incomplete['missing_references'][0]['referenced_by']['kind'] == 'selection'
+
+    future = downloaded
+    future['format'] = 'exchange-package/v999'
+    checked = s.call('POST', '/api/v1/exchange-packages/inspect', future, 422)
+    assert not checked['valid'] and any('v999' in issue for issue in checked['issues'])
+    s.call('POST', '/api/v1/exchange-packages/inspect', {'format': 'exchange-package/v1'}, 422)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'exchange', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'exchange'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

@@ -29,6 +29,11 @@
       "responsibility": "interval alignment"
     },
     {
+      "id": "exchange",
+      "path": "internal/exchange",
+      "responsibility": "deterministic exchange packages"
+    },
+    {
       "id": "persistence",
       "path": "internal/persistence",
       "responsibility": "atomic snapshots and recovery"
@@ -44,7 +49,9 @@
       "state_transition",
       "error_propagation",
       "resource_lifecycle",
-      "concurrency"
+      "concurrency",
+      "reference_closure",
+      "content_addressing"
     ]
   },
   "workflows": [
@@ -112,7 +119,7 @@
       "steps": [
         "validate filters",
         "select profiles",
-        "paginate revisions and export comparison"
+        "paginate revisions"
       ],
       "success": "filtered profiles and CSV returned",
       "failure": "invalid filters rejected",
@@ -121,6 +128,26 @@
         "api",
         "catalog",
         "geology",
+        "persistence"
+      ]
+    },
+    {
+      "id": "exchange",
+      "name": "对外交换",
+      "entry": "POST /api/v1/exchange-packages",
+      "steps": [
+        "normalize selections",
+        "expand reference closure",
+        "hash immutable manifest",
+        "inspect against current service"
+      ],
+      "success": "deterministic immutable package and read-only inspection returned",
+      "failure": "missing references are explicitly reported and unknown formats invalid",
+      "verification": "bounded HTTP workflow smoke check",
+      "module_ids": [
+        "api",
+        "catalog",
+        "exchange",
         "persistence"
       ]
     }

@@ -3,23 +3,36 @@ package persistence
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
-	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"reflect"
+
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/exchange"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 )
 
 type State struct {
 	Schema      int                           `json:"schema"`
 	Histories   map[string][]geology.Revision `json:"histories"`
 	Comparisons map[string]correlation.Result `json:"comparisons"`
+	Packages    map[string]exchange.Envelope `json:"packages,omitempty"`
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{
+		Schema:      1,
+		Histories:   map[string][]geology.Revision{},
+		Comparisons: map[string]correlation.Result{},
+		Packages:    map[string]exchange.Envelope{},
+	}
 }
 
 func (s State) Clone() State {
-	out := emptyState()
+	out := State{
+		Schema:      s.Schema,
+		Histories:   map[string][]geology.Revision{},
+		Comparisons: map[string]correlation.Result{},
+		Packages:    map[string]exchange.Envelope{},
+	}
 	for id, revisions := range s.Histories {
 		copies := make([]geology.Revision, len(revisions))
 		for i, r := range revisions {
@@ -29,6 +42,12 @@ func (s State) Clone() State {
 	}
 	for id, result := range s.Comparisons {
 		out.Comparisons[id] = result.Clone()
+	}
+	if s.Packages != nil {
+		out.Packages = map[string]exchange.Envelope{}
+		for id, pkg := range s.Packages {
+			out.Packages[id] = pkg
+		}
 	}
 	return out
 }
@@ -55,6 +74,19 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 func (s State) Validate() error {
 	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
 		return fmt.Errorf("unsupported snapshot shape")
+	}
+	if s.Packages != nil {
+		for id, pkg := range s.Packages {
+			if id != pkg.PackageID {
+				return fmt.Errorf("invalid exchange package identity")
+			}
+			if valid, issues := exchange.Validate(pkg); !valid {
+				if len(issues) > 0 {
+					return fmt.Errorf("invalid exchange package %s: %s", id, issues[0])
+				}
+				return fmt.Errorf("invalid exchange package %s", id)
+			}
+		}
 	}
 	for id, history := range s.Histories {
 		if len(history) == 0 {
