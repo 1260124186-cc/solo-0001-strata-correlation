@@ -71,7 +71,7 @@ func (s *Service) Replace(ctx context.Context, id string, input ReplaceLayers) (
 		if err = geology.CheckEditable(p, input.ExpectedVersion); err != nil {
 			return false, err
 		}
-		layers, err := geology.NormalizeLayers(input.Layers, p.DepthMM)
+		layers, err := geology.NormalizeLayersLegacy(input.Layers, p.DepthMM, state.LegacyMarkers(id))
 		if err != nil {
 			return false, err
 		}

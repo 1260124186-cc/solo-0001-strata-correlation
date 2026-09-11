@@ -8,7 +8,13 @@ import (
 	"time"
 )
 
-const Algorithm = "interval-v1"
+const (
+	// AlgorithmV1 is the frozen historical comparison: evidence matching
+	// used a case-only rule. Stored results keep being reproduced with it.
+	AlgorithmV1 = "interval-v1"
+	// Algorithm is the current comparison using the service-wide MarkerKey.
+	Algorithm = "interval-v2"
+)
 
 type Reference struct {
 	ID      string `json:"id"`
@@ -34,6 +40,10 @@ type MarkerPair struct {
 	LeftMM       int64  `json:"left_mm"`
 	RightMM      int64  `json:"right_mm"`
 	DifferenceMM int64  `json:"difference_mm"`
+	// RightName is present only when the right profile catalogued the same
+	// marker with a different raw spelling (case/width variants). Its
+	// absence keeps interval-v1 JSON byte-identical with stored results.
+	RightName string `json:"right_name,omitempty"`
 }
 
 type Result struct {
@@ -65,13 +75,21 @@ func (r Request) Validate() error {
 	return nil
 }
 
-func (r Request) Key() string {
+// Key hashes the request together with the algorithm that computes it.
+// Same logical inputs compared under interval-v1 and interval-v2 are
+// different calculations (they may match different marker spellings), so
+// both results can coexist without overwriting each other.
+func Key(algorithm string, r Request) string {
 	b, _ := json.Marshal(struct {
 		Algorithm string
 		Request   Request
-	}{Algorithm, r})
+	}{algorithm, r})
 	sum := sha256.Sum256(b)
 	return "cmp_" + hex.EncodeToString(sum[:16])
+}
+
+func (r Request) Key() string {
+	return Key(Algorithm, r)
 }
 
 func (r Result) Clone() Result {

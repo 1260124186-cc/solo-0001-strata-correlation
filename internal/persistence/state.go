@@ -3,19 +3,26 @@ package persistence
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
+
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
-	"reflect"
 )
 
 type State struct {
-	Schema      int                           `json:"schema"`
-	Histories   map[string][]geology.Revision `json:"histories"`
-	Comparisons map[string]correlation.Result `json:"comparisons"`
+	Schema         int                              `json:"schema"`
+	Histories      map[string][]geology.Revision    `json:"histories"`
+	Comparisons    map[string]correlation.Result    `json:"comparisons"`
+	MarkerGlossary map[string]geology.GlossaryEntry `json:"marker_glossary"`
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{
+		Schema:         1,
+		Histories:      map[string][]geology.Revision{},
+		Comparisons:    map[string]correlation.Result{},
+		MarkerGlossary: map[string]geology.GlossaryEntry{},
+	}
 }
 
 func (s State) Clone() State {
@@ -29,6 +36,9 @@ func (s State) Clone() State {
 	}
 	for id, result := range s.Comparisons {
 		out.Comparisons[id] = result.Clone()
+	}
+	for key, entry := range s.MarkerGlossary {
+		out.MarkerGlossary[key] = entry
 	}
 	return out
 }
@@ -52,19 +62,39 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 	return history[version-1].Clone(), nil
 }
 
+// LegacyMarkers scans every revision for marker spellings that collide under
+// the unified geology.MarkerKey but already existed historically (case
+// variants were legal under the old rule, width variants may predate it).
+// The collisions are grandfathered per profile and never rewritten.
+func (s State) LegacyMarkers(id string) geology.LegacyMarkers {
+	legacy := geology.LegacyMarkers{}
+	for _, revision := range s.Histories[id] {
+		legacy.Merge(geology.ScanLegacy(revision.Profile.Layers))
+	}
+	return legacy
+}
+
 func (s State) Validate() error {
 	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
 		return fmt.Errorf("unsupported snapshot shape")
+	}
+	// A missing marker_glossary is a pre-glossary snapshot and simply means
+	// the empty word list; it must not block loading existing data.
+	if s.MarkerGlossary != nil {
+		if err := geology.ValidateGlossary(s.MarkerGlossary); err != nil {
+			return fmt.Errorf("invalid marker glossary: %w", err)
+		}
 	}
 	for id, history := range s.Histories {
 		if len(history) == 0 {
 			return fmt.Errorf("empty history %s", id)
 		}
+		legacy := s.LegacyMarkers(id)
 		for i, r := range history {
 			if r.Profile.ID != id || r.Profile.Version != i+1 || r.Event.Version != i+1 || !r.Event.At.Equal(r.Profile.UpdatedAt) {
 				return fmt.Errorf("inconsistent revision %s/%d", id, i+1)
 			}
-			if err := r.Profile.Validate(); err != nil {
+			if err := r.Profile.ValidateLegacy(legacy); err != nil {
 				return fmt.Errorf("invalid revision %s: %w", id, err)
 			}
 			if err := geology.Text("reason", r.Event.Reason, 1, 500); err != nil {
@@ -86,8 +116,11 @@ func (s State) Validate() error {
 		}
 	}
 	for id, result := range s.Comparisons {
-		if id != result.ID || id != result.Request.Key() || result.Algorithm != correlation.Algorithm || result.CreatedAt.IsZero() {
+		if id != result.ID || id != correlation.Key(result.Algorithm, result.Request) || result.CreatedAt.IsZero() {
 			return fmt.Errorf("invalid comparison identity")
+		}
+		if result.Algorithm != correlation.AlgorithmV1 && result.Algorithm != correlation.Algorithm {
+			return fmt.Errorf("unsupported comparison algorithm")
 		}
 		a, err := s.Revision(result.Request.Left.ID, result.Request.Left.Version)
 		if err != nil {
@@ -97,7 +130,7 @@ func (s State) Validate() error {
 		if err != nil {
 			return err
 		}
-		computed, err := correlation.Align(a.Profile, b.Profile, result.Request, result.CreatedAt)
+		computed, err := correlation.AlignValidated(result.Algorithm, a.Profile, b.Profile, result.Request, result.CreatedAt)
 		if err != nil {
 			return err
 		}

@@ -75,6 +75,16 @@ func (p Profile) Clone() Profile {
 }
 
 func (p Profile) Validate() error {
+	return p.validate(nil)
+}
+
+// ValidateLegacy keeps revisions that already contained equivalent marker
+// spellings under the old rule loadable; see NormalizeLayersLegacy.
+func (p Profile) ValidateLegacy(legacy LegacyMarkers) error {
+	return p.validate(legacy)
+}
+
+func (p Profile) validate(legacy LegacyMarkers) error {
 	if !ValidID(p.ID, "prf_") {
 		return Invalid("id", "剖面编号无效")
 	}
@@ -94,7 +104,7 @@ func (p Profile) Validate() error {
 	if p.CreatedAt.IsZero() || p.UpdatedAt.Before(p.CreatedAt) {
 		return Invalid("time", "时间顺序无效")
 	}
-	if err := ValidateLayers(p.Layers, p.DepthMM); err != nil {
+	if err := validateLayers(p.Layers, p.DepthMM, legacy); err != nil {
 		return err
 	}
 	if p.State == Sealed && len(CoverageOf(p).Gaps) != 0 {

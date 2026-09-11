@@ -44,6 +44,13 @@ type Layer struct {
 }
 
 func NormalizeLayers(in []Layer, depth int64) ([]Layer, error) {
+	return NormalizeLayersLegacy(in, depth, nil)
+}
+
+// NormalizeLayersLegacy is the historical-data path: collisions already
+// present in a grandfathered revision keep being accepted when the profile
+// is edited, but any newly introduced equivalent spelling is rejected.
+func NormalizeLayersLegacy(in []Layer, depth int64, legacy LegacyMarkers) ([]Layer, error) {
 	layers := append([]Layer{}, in...)
 	for i := range layers {
 		layers[i].Description = strings.TrimSpace(layers[i].Description)
@@ -55,14 +62,18 @@ func NormalizeLayers(in []Layer, depth int64) ([]Layer, error) {
 		}
 		return layers[i].BottomMM < layers[j].BottomMM
 	})
-	return layers, ValidateLayers(layers, depth)
+	return layers, validateLayers(layers, depth, legacy)
 }
 
 func ValidateLayers(layers []Layer, depth int64) error {
+	return validateLayers(layers, depth, nil)
+}
+
+func validateLayers(layers []Layer, depth int64, legacy LegacyMarkers) error {
 	if len(layers) > MaxLayers {
 		return Invalid("layers", "最多允许 500 层")
 	}
-	markers := make(map[string]bool)
+	seen := make(map[string][]string)
 	for i, layer := range layers {
 		field := fmt.Sprintf("layers[%d]", i)
 		if layer.TopMM < 0 || layer.BottomMM <= layer.TopMM || layer.BottomMM > depth {
@@ -77,19 +88,21 @@ func ValidateLayers(layers []Layer, depth int64) error {
 		if err := Text(field+".description", layer.Description, 0, 1000); err != nil {
 			return err
 		}
-		if err := Text(field+".marker", layer.Marker, 0, 80); err != nil {
+		if err := Text(field+".marker", layer.Marker, 0, MarkerNameMax); err != nil {
 			return err
 		}
 		if strings.TrimSpace(layer.Marker) != layer.Marker || strings.TrimSpace(layer.Description) != layer.Description {
 			return Invalid(field, "分层文字未规范化")
 		}
-		if layer.Marker != "" {
-			key := strings.ToLower(layer.Marker)
-			if markers[key] {
-				return Invalid(field+".marker", "同一剖面的标志层名称不能重复")
-			}
-			markers[key] = true
+		if layer.Marker == "" {
+			continue
 		}
+		key := MarkerKey(layer.Marker)
+		prior := seen[key]
+		if len(prior) > 0 && !legacy.Allows(key, append(prior, layer.Marker)...) {
+			return Invalid(field+".marker", "同一剖面的标志层名称不能重复")
+		}
+		seen[key] = append(prior, layer.Marker)
 	}
 	return nil
 }

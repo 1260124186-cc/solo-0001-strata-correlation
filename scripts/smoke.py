@@ -243,11 +243,95 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def markers(s):
+    # One equivalence predicate everywhere: case and full/half-width
+    # variants are treated as the same marker name.
+    p = create(s, '标志层统一语义剖面')
+    variants = [
+        [dict(top_mm=0, bottom_mm=5000, rock='sandstone', marker='Tuff A'),
+         dict(top_mm=5000, bottom_mm=10000, rock='mudstone', marker='tuff ａ')],
+        [dict(top_mm=0, bottom_mm=5000, rock='sandstone', marker='Ｋ-１'),
+         dict(top_mm=5000, bottom_mm=10000, rock='mudstone', marker='k-1')],
+        [dict(top_mm=0, bottom_mm=5000, rock='sandstone', marker='K T'),
+         dict(top_mm=5000, bottom_mm=10000, rock='mudstone', marker='k　t')],
+        [dict(top_mm=0, bottom_mm=5000, rock='sandstone', marker='ﾊﾝ'),
+         dict(top_mm=5000, bottom_mm=10000, rock='mudstone', marker='ハン')],
+    ]
+    for values in variants:
+        replace(s, p, values, expected=422)
+    good = [dict(top_mm=0, bottom_mm=5000, rock='sandstone', marker='K-1'),
+            dict(top_mm=5000, bottom_mm=10000, rock='mudstone', marker='')]
+    p = replace(s, p, good)
+    left = state(s, p, 'seal')
+
+    def sealed_with(marker):
+        q = replace(s, create(s, f'对比-{marker[:4]}'),
+                    [dict(top_mm=0, bottom_mm=5000, rock='sandstone', marker=marker),
+                     dict(top_mm=5000, bottom_mm=10000, rock='mudstone', marker='')])
+        return state(s, q, 'seal')
+
+    right = sealed_with('ｋ－１')  # full-width equivalent of K-1
+    refs = dict(left=dict(id=left['id'], version=3), right=dict(id=right['id'], version=3))
+    proposal = s.call('POST', '/api/v1/comparison-offsets', refs)
+    assert len(proposal['evidence']) == 1
+    evidence = proposal['evidence'][0]
+    assert evidence['marker'] == 'K-1'
+    assert evidence['left_marker'] == 'K-1' and evidence['right_marker'] == 'ｋ－１'
+    reverse = s.call('POST', '/api/v1/comparison-offsets',
+                     dict(left=refs['right'], right=refs['left']))
+    assert reverse['evidence'][0]['marker'] == 'ｋ－１'
+    result = s.call('POST', '/api/v1/comparisons', proposal['comparison'], 201)
+    assert result['algorithm'] == 'interval-v2'
+    pair = result['markers'][0]
+    assert pair['name'] == 'K-1' and pair['right_name'] == 'ｋ－１'
+    assert s.call('POST', '/api/v1/comparisons', proposal['comparison'], 200) == result
+
+    # Spelling variants between distinct markers stay distinct.
+    other = sealed_with('K-2')
+    no_match = dict(left=refs['left'], right=dict(id=other['id'], version=3))
+    s.call('POST', '/api/v1/comparison-offsets', no_match, expected=409)
+
+    # External glossary merge: reject is all-or-nothing.
+    batch = dict(policy='reject', entries=[
+        dict(canonical_name='凝灰岩标志层', note='全区标准层'),
+        dict(canonical_name=' 凝灰岩标志层 ', note='批内等价键取首条'),
+    ])
+    merged = s.call('POST', '/api/v1/marker-glossary/merge', batch)
+    assert merged['created'] == 1 and merged['entries'][0]['status'] == 'created'
+    s.call('POST', '/api/v1/marker-glossary/merge',
+           dict(policy='reject', entries=[dict(canonical_name='ＮＧＨ', note='')]), 200)
+    for failing, status in [
+        (dict(policy='reject', entries=[dict(canonical_name='凝灰岩标志层', note='已存在')]), 409),
+        (dict(policy='reject', entries=[dict(canonical_name='NGH', note='大小写冲突')]), 409),
+        (dict(policy='reject', entries=[dict(canonical_name='ｎｇｈ', note='全半角冲突')]), 409),
+        (dict(policy='reject', entries=[dict(canonical_name='', note='空名称')]), 422),
+        (dict(policy='reject', entries=[]), 422),
+        (dict(policy='bogus', entries=[dict(canonical_name='X')]), 422),
+    ]:
+        s.call('POST', '/api/v1/marker-glossary/merge', failing, status)
+    assert s.call('GET', '/api/v1/marker-glossary')['total'] == 2
+    replaced = s.call('POST', '/api/v1/marker-glossary/merge',
+                      dict(policy='replace', entries=[
+                          dict(canonical_name='凝灰岩标志层', note='更新说明'),
+                          dict(canonical_name='NGH', note='宽度折叠覆盖'),
+                      ]))
+    assert replaced['replaced'] == 2 and replaced['created'] == 0
+    listing = s.call('GET', '/api/v1/marker-glossary?limit=1&offset=1')
+    assert listing['total'] == 2 and len(listing['items']) == 1
+    s.call('GET', '/api/v1/marker-glossary?extra=1', expected=422)
+    # no grandfathered collisions in this fresh store
+    assert s.call('GET', '/api/v1/legacy-markers')['profiles'] == []
+    s.stop()
+    s.start()
+    assert s.call('GET', '/api/v1/marker-glossary')['total'] == 2
+    assert s.call('GET', f"/api/v1/comparisons/{result['id']}")['markers'][0]['right_name'] == 'ｋ－１'
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'markers', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'markers'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

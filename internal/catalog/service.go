@@ -93,7 +93,7 @@ func appendRevision(state *persistence.State, revision geology.Revision) error {
 	if revision.Profile.Version != len(history)+1 {
 		return geology.Conflict("版本顺序不一致")
 	}
-	if err := revision.Profile.Validate(); err != nil {
+	if err := revision.Profile.ValidateLegacy(state.LegacyMarkers(revision.Profile.ID)); err != nil {
 		return err
 	}
 	state.Histories[revision.Profile.ID] = append(history, revision.Clone())

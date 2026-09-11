@@ -1,9 +1,9 @@
 package correlation
 
 import (
-	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"sort"
-	"strings"
+
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 )
 
 type OffsetRequest struct {
@@ -12,7 +12,12 @@ type OffsetRequest struct {
 }
 
 type Evidence struct {
+	// Marker is the primary display spelling, taken from the left profile.
+	// LeftMarker and RightMarker expose both cataloguers' raw spellings so
+	// case/width variants stay explainable in the suggestion output.
 	Marker           string `json:"marker"`
+	LeftMarker       string `json:"left_marker"`
+	RightMarker      string `json:"right_marker"`
 	LeftTopMM        int64  `json:"left_top_mm"`
 	RightTopMM       int64  `json:"right_top_mm"`
 	RequiredOffsetMM int64  `json:"required_offset_mm"`
@@ -28,8 +33,10 @@ type OffsetProposal struct {
 	Ambiguous              bool       `json:"ambiguous"`
 }
 
-// The median minimizes the total absolute marker discrepancy. An even number
-// uses the midpoint of the two middle values, rounded toward zero in millimetres.
+// Suggest uses the current service-wide marker equivalence (geology.MarkerKey):
+// any name pair that would be rejected as a duplicate inside one profile is
+// also matched here and vice versa. The pairing itself is the same code used
+// for comparison evidence.
 func Suggest(left, right geology.Profile, input OffsetRequest) (OffsetProposal, error) {
 	request := Request{Left: input.Left, Right: input.Right}
 	if err := request.Validate(); err != nil {
@@ -41,25 +48,19 @@ func Suggest(left, right geology.Profile, input OffsetRequest) (OffsetProposal, 
 	if left.State != geology.Sealed || right.State != geology.Sealed {
 		return OffsetProposal{}, geology.Conflict("偏移建议需要两个锁定版本")
 	}
-	markers := make(map[string]geology.Layer)
-	for _, layer := range right.Layers {
-		if layer.Marker != "" {
-			markers[strings.ToLower(layer.Marker)] = layer
-		}
-	}
 	result := OffsetProposal{Comparison: request, Evidence: []Evidence{}}
 	offsets := make([]int64, 0)
-	for _, layer := range left.Layers {
-		if layer.Marker == "" {
-			continue
-		}
-		other, exists := markers[strings.ToLower(layer.Marker)]
-		if !exists {
-			continue
-		}
-		difference := layer.TopMM - other.TopMM
+	for _, pair := range pairMarkers(left.Layers, right.Layers, geology.MarkerKey) {
+		difference := pair.left.TopMM - pair.right.TopMM
 		offsets = append(offsets, difference)
-		result.Evidence = append(result.Evidence, Evidence{Marker: layer.Marker, LeftTopMM: layer.TopMM, RightTopMM: other.TopMM, RequiredOffsetMM: difference})
+		result.Evidence = append(result.Evidence, Evidence{
+			Marker:           pair.left.Marker,
+			LeftMarker:       pair.left.Marker,
+			RightMarker:      pair.right.Marker,
+			LeftTopMM:        pair.left.TopMM,
+			RightTopMM:       pair.right.TopMM,
+			RequiredOffsetMM: difference,
+		})
 	}
 	if len(offsets) == 0 {
 		return OffsetProposal{}, geology.Conflict("两个版本没有共同标志层")
@@ -86,7 +87,7 @@ func Suggest(left, right geology.Profile, input OffsetRequest) (OffsetProposal, 
 	result.Ambiguous = offsets[0] != offsets[len(offsets)-1]
 	top := max(int64(0), median)
 	bottom := min(left.DepthMM, right.DepthMM+median)
-	result.ExpectedOverlapMM = max(int64(0), bottom-top)
+	result.ExpectedOverlapMM = max(0, bottom-top)
 	if result.ExpectedOverlapMM == 0 {
 		return OffsetProposal{}, geology.Conflict("共同标志层无法形成有效共同区间")
 	}

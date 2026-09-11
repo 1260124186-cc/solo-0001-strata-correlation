@@ -23,7 +23,7 @@ func (s *Service) Compare(ctx context.Context, input correlation.Request) (corre
 	var result correlation.Result
 	reused := false
 	err := s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
-		if cached, ok := state.Comparisons[input.Key()]; ok {
+		if cached, ok := state.Comparisons[correlation.Key(correlation.Algorithm, input)]; ok {
 			result = cached.Clone()
 			reused = true
 			return false, nil
@@ -39,7 +39,10 @@ func (s *Service) Compare(ctx context.Context, input correlation.Request) (corre
 		if err != nil {
 			return false, err
 		}
-		result, err = correlation.Align(left.Profile, right.Profile, input, time.Now().UTC())
+		// Revisions are immutable; profiles that already carried equivalent
+		// spellings must stay usable for new comparisons. The revision
+		// structure itself was validated at load with the grandfather set.
+		result, err = correlation.AlignValidated(correlation.Algorithm, left.Profile, right.Profile, input, time.Now().UTC())
 		if err != nil {
 			return false, err
 		}
