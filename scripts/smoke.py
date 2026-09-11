@@ -3,6 +3,7 @@
 import argparse
 import concurrent.futures
 import csv
+import hashlib
 import io
 import json
 import os
@@ -118,6 +119,15 @@ def state(s, p, action, expected=200):
 
 def sealed(s, name, boundary=4000):
     return state(s, replace(s, create(s, name), layers(boundary)), 'seal')
+
+
+def rewrite_snapshot(snapshot, state_obj):
+    """重写快照信封。Go 校验 digest 针对 data 的原始 JSON 字节，而
+    envelope 再次序列化时会把 data 作为对象嵌入，两次序列化必须产生
+    完全相同的字节（紧凑、不转义非 ASCII），否则校验值失配。"""
+    raw = json.dumps(state_obj, ensure_ascii=False, separators=(',', ':'))
+    env_text = '{"digest":"' + hashlib.sha256(raw.encode()).hexdigest() + '","data":' + raw + '}'
+    snapshot.write_text(env_text)
 
 
 def record(s):
@@ -243,11 +253,127 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def batch(s):
+    a = create(s, '批量北剖面')
+    b = create(s, '批量南剖面')
+    locked_p = sealed(s, '批量锁定剖面')
+    # 条目覆盖：成功的元数据/分层修订、版本冲突、锁定状态冲突、不存在的剖面、
+    # 形状错误。后面成功条目必须不受前面失败影响。
+    items = [
+        dict(profile_id=a['id'], action='metadata', expected_version=1,
+             metadata=dict(name='批量北剖面-改', site=a['site'], depth_mm=a['depth_mm'])),
+        dict(profile_id=b['id'], action='layers', expected_version=1, layers=layers()),
+        dict(profile_id=a['id'], action='metadata', expected_version=1,
+             metadata=dict(name='过期版本', site=a['site'], depth_mm=a['depth_mm'])),
+        dict(profile_id=locked_p['id'], action='layers', expected_version=locked_p['version'], layers=layers()),
+        dict(profile_id='prf_' + '0' * 32, action='seal', expected_version=1),
+        dict(profile_id=b['id'], action='seal', expected_version=2),
+        dict(profile_id=a['id'], action='bogus', expected_version=2),
+        dict(profile_id=a['id'], action='reopen', expected_version=2),
+    ]
+    result = s.call('POST', '/api/v1/profile-revisions/batch',
+                    dict(reason='批量修订批次', items=items), 201)
+    assert result['status'] == 'completed', result
+    statuses = [(x['index'], x['status']) for x in result['items']]
+    assert statuses == [(0, 'success'), (1, 'success'), (2, 'failed'),
+                        (3, 'failed'), (4, 'failed'), (5, 'success'),
+                        (6, 'failed'), (7, 'failed')], statuses
+    assert [x['version'] for x in result['items'] if x['status'] == 'success'] == [2, 2, 3]
+    assert {x['error_code'] for x in result['items'] if x['status'] == 'failed'} == {'conflict', 'missing', 'invalid'}
+    failed_version = next(x for x in result['items'] if x['index'] == 2)
+    assert failed_version['error_code'] == 'conflict' and '预期版本' in failed_version['error']
+    # GET 台账与 POST 响应一致
+    fetched = s.call('GET', f"/api/v1/profile-revisions/batch/{result['id']}")
+    assert fetched == result
+    # 单份原子性：成功条目落盘，冲突/形状错误的剖面保持原样
+    cur_a = s.call('GET', f'/api/v1/profiles/{a["id"]}')
+    assert cur_a['version'] == 2 and cur_a['name'] == '批量北剖面-改' and cur_a['layers'] == []
+    cur_b = s.call('GET', f'/api/v1/profiles/{b["id"]}')
+    assert cur_b['version'] == 3 and cur_b['state'] == 'sealed'
+    assert [x['action'] for x in s.call('GET', f'/api/v1/profiles/{b["id"]}/history')['items']] == ['create', 'layers', 'seal']
+    cur_locked = s.call('GET', f'/api/v1/profiles/{locked_p["id"]}')
+    assert cur_locked['version'] == locked_p['version']
+    # 请求级形状错误整体拒绝；条目级形状错误只让该条目失败
+    s.call('POST', '/api/v1/profile-revisions/batch', dict(reason='空批', items=[]), 422)
+    s.call('POST', '/api/v1/profile-revisions/batch', dict(reason='缺数组'), 422)
+    s.call('POST', '/api/v1/profile-revisions/batch',
+           dict(reason='条目过多', items=[dict(profile_id=a['id'], action='seal', expected_version=1)] * 201), 422)
+    s.call('POST', '/api/v1/profile-revisions/batch',
+           dict(reason='x' * 501, items=[dict(profile_id=a['id'], action='seal', expected_version=1)]), 422)
+    malformed = s.call('POST', '/api/v1/profile-revisions/batch', dict(
+        reason='载荷缺失', items=[
+            dict(profile_id=a['id'], action='metadata', expected_version=2),
+            dict(profile_id=a['id'], action='weird', expected_version=2),
+            dict(profile_id='nope', action='seal', expected_version=1),
+        ]), 201)
+    assert malformed['status'] == 'completed'
+    assert [x['status'] for x in malformed['items']] == ['failed', 'failed', 'failed']
+    assert [x['error_code'] for x in malformed['items']] == ['invalid', 'invalid', 'invalid']
+    s.call('GET', '/api/v1/profile-revisions/batch/bat_' + '0' * 32, expected=404)
+    # 完成的批次重启后仍可查，剖面修订不丢
+    s.stop()
+    s.start()
+    assert s.call('GET', f"/api/v1/profile-revisions/batch/{result['id']}") == result
+    assert s.call('GET', f'/api/v1/profiles/{b["id"]}')['version'] == 3
+    # 模拟崩溃发生在批次条目之间：真实崩溃点上，已提交的只有条目 0，
+    # 后续条目的剖面修订根本不在快照中。构造方式：批次截断为 4 项，
+    # 仅条目 0 保留 success，1–3 退回 pending；同时回滚 b 的历史到
+    # 修订前（它的 layers/seal 修订来自条目 1/5，尚未提交）。
+    s.stop()
+    snapshot = s.directory / 'data' / 'strata.json'
+    state = json.loads(snapshot.read_text())['data']
+    batch = state['batches'][result['id']]
+    assert batch['status'] == 'completed'
+    batch['status'] = 'running'
+    del batch['items'][4:]
+    for item in batch['items'][1:]:
+        item['status'] = 'pending'
+        item['error_code'] = ''
+        item['error'] = ''
+        item['result_version'] = 0
+    state['histories'][b['id']] = state['histories'][b['id']][:1]
+    rewrite_snapshot(snapshot, state)
+    s.start()
+    recovered = s.call('GET', f"/api/v1/profile-revisions/batch/{result['id']}")
+    assert recovered['status'] == 'interrupted', recovered
+    assert recovered['items'][0]['status'] == 'success'
+    assert len(recovered['items']) == 4
+    assert all(x['status'] == 'not_attempted' and x['error_code'] == 'interrupted'
+               for x in recovered['items'][1:]), recovered
+    # 恢复写回的快照本身必须可再次打开（在任何新写入之前验证）
+    s.stop()
+    s.start()
+    assert s.call('GET', f"/api/v1/profile-revisions/batch/{result['id']}")['status'] == 'interrupted'
+    # 崩溃时只提交了条目 0：b 的分层修订必须不存在
+    cur_b_after = s.call('GET', f'/api/v1/profiles/{b["id"]}')
+    assert cur_b_after['version'] == 1 and cur_b_after['state'] == 'draft', cur_b_after
+    # a 的元数据修订（条目 0）保留且可解释
+    cur_a_after = s.call('GET', f'/api/v1/profiles/{a["id"]}')
+    assert cur_a_after['version'] == 2 and cur_a_after['name'] == '批量北剖面-改'
+    # 恢复后服务仍可继续接受新的批量修订
+    again = s.call('POST', '/api/v1/profile-revisions/batch', dict(
+        reason='恢复后批次', items=[dict(profile_id=a['id'], action='metadata', expected_version=2,
+        metadata=dict(name='批量北剖面-再改', site=a['site'], depth_mm=a['depth_mm']))]), 201)
+    assert again['status'] == 'completed' and again['items'][0]['status'] == 'success'
+
+    # 崩溃在最后条目已提交、完成标记尚未写入之间：running 且无 pending，
+    # 恢复必须终结为 completed（修订不丢、无 not_attempted）。
+    s.stop()
+    snapshot = s.directory / 'data' / 'strata.json'
+    state2 = json.loads(snapshot.read_text())['data']
+    state2['batches'][again['id']]['status'] = 'running'
+    rewrite_snapshot(snapshot, state2)
+    s.start()
+    fixed = s.call('GET', f"/api/v1/profile-revisions/batch/{again['id']}")
+    assert fixed['status'] == 'completed' and fixed['items'][0]['status'] == 'success'
+    assert s.call('GET', f'/api/v1/profiles/{a["id"]}')['name'] == '批量北剖面-再改'
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'batch', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'batch'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

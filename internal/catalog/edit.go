@@ -2,6 +2,8 @@ package catalog
 
 import (
 	"context"
+	"time"
+
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/persistence"
 )
@@ -23,6 +25,63 @@ type StateChange struct {
 	Reason          string `json:"reason"`
 }
 
+// applyMetadata、applyLayers 和 applyStateChange 只读写传入的状态，
+// 供单剖面接口和批量修订共用，保证两种入口的校验规则完全一致。
+func applyMetadata(state *persistence.State, id string, expected int, metadata geology.Metadata, reason string, now time.Time) (geology.Profile, error) {
+	p, err := state.Latest(id)
+	if err != nil {
+		return geology.Profile{}, err
+	}
+	if err = geology.CheckEditable(p, expected); err != nil {
+		return geology.Profile{}, err
+	}
+	p.Metadata = metadata
+	p.Version++
+	p.UpdatedAt = nextTimeAt(p.UpdatedAt, now)
+	revision := geology.Revision{Profile: p, Event: geology.Event{Action: "metadata", Reason: reason, Version: p.Version, At: p.UpdatedAt}}
+	if err = appendRevision(state, revision); err != nil {
+		return geology.Profile{}, err
+	}
+	return p, nil
+}
+
+func applyLayers(state *persistence.State, id string, expected int, layers []geology.Layer, reason string, now time.Time) (geology.Profile, error) {
+	p, err := state.Latest(id)
+	if err != nil {
+		return geology.Profile{}, err
+	}
+	if err = geology.CheckEditable(p, expected); err != nil {
+		return geology.Profile{}, err
+	}
+	normalized, err := geology.NormalizeLayers(layers, p.DepthMM)
+	if err != nil {
+		return geology.Profile{}, err
+	}
+	p.Layers = normalized
+	p.Version++
+	p.UpdatedAt = nextTimeAt(p.UpdatedAt, now)
+	revision := geology.Revision{Profile: p, Event: geology.Event{Action: "layers", Reason: reason, Version: p.Version, At: p.UpdatedAt}}
+	if err = appendRevision(state, revision); err != nil {
+		return geology.Profile{}, err
+	}
+	return p, nil
+}
+
+func applyStateChange(state *persistence.State, id string, target geology.State, expected int, reason string, now time.Time) (geology.Profile, error) {
+	p, err := state.Latest(id)
+	if err != nil {
+		return geology.Profile{}, err
+	}
+	revision, err := geology.ChangeState(p, target, expected, reason, nextTimeAt(p.UpdatedAt, now))
+	if err != nil {
+		return geology.Profile{}, err
+	}
+	if err = appendRevision(state, revision); err != nil {
+		return geology.Profile{}, err
+	}
+	return revision.Profile, nil
+}
+
 func (s *Service) Edit(ctx context.Context, id string, input EditMetadata) (geology.Profile, error) {
 	metadata, err := geology.NormalizeMetadata(input.Metadata)
 	if err != nil {
@@ -34,18 +93,8 @@ func (s *Service) Edit(ctx context.Context, id string, input EditMetadata) (geol
 	}
 	var result geology.Profile
 	err = s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
-		p, err := state.Latest(id)
+		p, err := applyMetadata(state, id, input.ExpectedVersion, metadata, reason, time.Now().UTC())
 		if err != nil {
-			return false, err
-		}
-		if err = geology.CheckEditable(p, input.ExpectedVersion); err != nil {
-			return false, err
-		}
-		p.Metadata = metadata
-		p.Version++
-		p.UpdatedAt = nextTime(p.UpdatedAt)
-		revision := geology.Revision{Profile: p, Event: geology.Event{Action: "metadata", Reason: reason, Version: p.Version, At: p.UpdatedAt}}
-		if err = appendRevision(state, revision); err != nil {
 			return false, err
 		}
 		result = p
@@ -64,22 +113,8 @@ func (s *Service) Replace(ctx context.Context, id string, input ReplaceLayers) (
 	}
 	var result geology.Profile
 	err = s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
-		p, err := state.Latest(id)
+		p, err := applyLayers(state, id, input.ExpectedVersion, input.Layers, reason, time.Now().UTC())
 		if err != nil {
-			return false, err
-		}
-		if err = geology.CheckEditable(p, input.ExpectedVersion); err != nil {
-			return false, err
-		}
-		layers, err := geology.NormalizeLayers(input.Layers, p.DepthMM)
-		if err != nil {
-			return false, err
-		}
-		p.Layers = layers
-		p.Version++
-		p.UpdatedAt = nextTime(p.UpdatedAt)
-		revision := geology.Revision{Profile: p, Event: geology.Event{Action: "layers", Reason: reason, Version: p.Version, At: p.UpdatedAt}}
-		if err = appendRevision(state, revision); err != nil {
 			return false, err
 		}
 		result = p
@@ -95,18 +130,11 @@ func (s *Service) Change(ctx context.Context, id string, target geology.State, i
 	}
 	var result geology.Profile
 	err = s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
-		p, err := state.Latest(id)
+		p, err := applyStateChange(state, id, target, input.ExpectedVersion, reason, time.Now().UTC())
 		if err != nil {
 			return false, err
 		}
-		revision, err := geology.ChangeState(p, target, input.ExpectedVersion, reason, nextTime(p.UpdatedAt))
-		if err != nil {
-			return false, err
-		}
-		if err = appendRevision(state, revision); err != nil {
-			return false, err
-		}
-		result = revision.Profile
+		result = p
 		return true, nil
 	})
 	return result, err

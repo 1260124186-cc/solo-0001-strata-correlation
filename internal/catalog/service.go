@@ -30,6 +30,15 @@ func nextTime(previous time.Time) time.Time {
 	return now
 }
 
+// nextTimeAt 与 nextTime 相同，但允许调用方指定当前时刻，使批量条目
+// 的事件时间与批次台账时间来自同一个时钟采样。
+func nextTimeAt(previous, now time.Time) time.Time {
+	if now.Before(previous) {
+		return previous
+	}
+	return now
+}
+
 func (s *Service) Create(ctx context.Context, metadata geology.Metadata) (geology.Profile, error) {
 	normalized, err := geology.NormalizeMetadata(metadata)
 	if err != nil {

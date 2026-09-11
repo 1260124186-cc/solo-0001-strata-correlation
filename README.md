@@ -69,6 +69,43 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 `POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
+## 批量修订多份剖面
+
+```bash
+curl -sS -X POST http://127.0.0.1:8093/api/v1/profile-revisions/batch \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "reason": "野外补测统一修订",
+    "items": [
+      {"profile_id":"<id-a>","action":"metadata","expected_version":2,
+       "metadata":{"name":"赤石北坡剖面","site":"赤石岭北侧","depth_mm":10000,"note":""}},
+      {"profile_id":"<id-b>","action":"layers","expected_version":1,"layers":[...]},
+      {"profile_id":"<id-c>","action":"seal","expected_version":3},
+      {"profile_id":"<id-d>","action":"reopen","expected_version":4}
+    ]
+  }'
+```
+
+批次按顺序处理，最多 200 条，最多保留 1000 个批次台账；条目级 `reason` 缺省时使用请求级 `reason`，二者必须提供其一。`metadata` 条目只能带 `metadata`，`layers` 条目只能带 `layers`（`[]` 表示清空，`null` 或缺失被拒），`seal`/`reopen` 不接受载荷；未知字段沿用全局 JSON 规则。
+
+**原子边界落在单份剖面，而不是整批。** 每个条目在同一个快照提交点把"剖面修订 + 该条目的结果"一起落盘，所以单份剖面要么完整出现新版本、要么完全不变；前面条目失败不回滚已成功的剖面，后面条目也不受影响继续执行。批次本身不是一个全成或全不成的单元，因此**响应永远是 HTTP 201**（只有请求整体形状错误才 422），逐条目结果在 `items` 中：
+
+```json
+{
+  "id": "bat_…",
+  "status": "completed",
+  "items": [
+    {"index":0,"profile_id":"…","action":"seal","expected_version":3,"status":"success","version":4},
+    {"index":1,"profile_id":"…","action":"layers","expected_version":1,
+     "status":"failed","error_code":"conflict","error":"预期版本 1，当前版本 2"}
+  ]
+}
+```
+
+`status` 为 `success` 时 `version` 是提交后的新版本；`failed` 携带与单剖面接口一致的 `error_code`（`invalid / conflict / missing`）和中文原因，该剖面没有任何变化。批次状态为 `completed`（全部条目有了确定结果）或 `interrupted`（存储故障使批次中断）。`interrupted` 时未执行的条目状态为 `not_attempted`、`error_code` 为 `interrupted`；已提交条目的修订保留。批次编号写入 `Location`，可用 `GET /api/v1/profile-revisions/batch/{id}` 随时复查同一事实。
+
+进程在条目之间崩溃不会留下无法解释的半批状态：每个成功条目与台账结果共享提交点，而启动时会把遗留在磁盘上的 `running` 批次终结——已提交的 `success`/`failed` 条目保持原样，仍是 `pending` 的条目落为 `not_attempted`（原因 `interrupted`），批次变为 `interrupted`（若所有条目都已提交则变为 `completed`），恢复结果先落盘再对外服务。
+
 ## HTTP 接口
 
 接口统一前缀 `/api/v1`，请求体类型 `application/json`，最大 4 MiB；拒绝未知 JSON 字段及多个连续 JSON 对象。应用错误采用 `{"error":{"code":"invalid","field":"depth_mm","detail":"..."}}`。HTTP 422 表示字段错误，409 表示状态或版本冲突，404 表示资源缺失，415 表示请求类型错误，413 表示体积超限，500 表示内部故障。不存在的路由和不支持的方法使用 Go HTTP 的 404/405 响应。
@@ -86,6 +123,8 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /profiles/{id}/at` | 必填 `depth_mm`，可选 `version`；返回所属层或缺口 |
 | `POST /profiles/{id}/seal` | `expected_version, reason`，锁定当前版本 |
 | `POST /profiles/{id}/reopen` | `expected_version, reason`，重新打开 |
+| `POST /profile-revisions/batch` | 一次提交多条剖面修订，逐条落盘并返回每份的成败，见下文 |
+| `GET /profile-revisions/batch/{id}` | 查询批量修订台账，崩溃重启后仍可复查 |
 | `GET /profiles/{id}/history` | 按版本升序列出事件，支持 `offset, limit` |
 | `GET /profiles/{id}/revisions/{version}` | 指定历史版本及事件 |
 | `GET /profiles/{id}/diff` | 必填 `from, to`，查看同一剖面从旧版本到新版本的差异 |
@@ -103,7 +142,9 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 ## 持久化与恢复
 
-数据目录保存 `strata.json` 和 `strata.lock`。每次成功写入将全部状态写到同目录临时文件，执行文件 fsync 后原子替换快照，并对目录执行 fsync。剖面、版本事件和对比结果始终处于同一状态边界；失败的校验不会修改内存或磁盘。
+数据目录保存 `strata.json` 和 `strata.lock`。每次成功写入将全部状态写到同目录临时文件，执行文件 fsync 后原子替换快照，并对目录执行 fsync。剖面、版本事件、对比结果和批量修订台账始终处于同一状态边界；失败的校验不会修改内存或磁盘。
+
+批量修订把原子边界放在单份剖面上：每份剖面的修订与该批次条目的结果在**同一次**原子替换中一起生效，所以单份剖面要么完整写入、要么完全不变；批次作为台账依次记录每份剖面的结果，允许部分成功。批次处理期间台账状态为 `running`，服务启动时若发现遗留的 `running` 批次（说明上次在条目之间退出），会按磁盘上的实际提交情况把它终结为 `interrupted`（有未执行条目）或 `completed`（全部条目均已提交），未执行条目标记为 `not_attempted` 并注明中断原因。恢复后的台账先原子写回快照，服务才开始接受请求。
 
 快照包含 SHA-256 校验值。启动时检查校验值、版本连续性、状态转换及对比可重复性，遇到损坏拒绝启动。进程在替换前中断保留旧快照，替换后中断使用新快照。同目录遗留的 `.strata-*` 临时文件不会参与恢复，可在服务停止时清理。若替换后同步目录失败，服务保留新内存状态并停止后续写入，健康状态变为 503；检查磁盘并重启后再读取版本确认结果，不要盲目重放修改。
 
