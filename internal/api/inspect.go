@@ -21,7 +21,7 @@ func (h *Handler) point(w http.ResponseWriter, r *http.Request) {
 		h.error(w, r, err)
 		return
 	}
-	version, err := integer(q.Get("version"), "version", 0, 1, 500)
+	version, err := integer(q.Get("version"), "version", 0, 1, maxVersion)
 	if err != nil {
 		h.error(w, r, err)
 		return
@@ -58,12 +58,12 @@ func (h *Handler) difference(w http.ResponseWriter, r *http.Request) {
 		h.error(w, r, geology.Invalid("version", "必须提供 from 和 to"))
 		return
 	}
-	from, err := integer(q.Get("from"), "from", 0, 1, 500)
+	from, err := integer(q.Get("from"), "from", 0, 1, maxVersion)
 	if err != nil {
 		h.error(w, r, err)
 		return
 	}
-	to, err := integer(q.Get("to"), "to", 0, 1, 500)
+	to, err := integer(q.Get("to"), "to", 0, 1, maxVersion)
 	if err != nil {
 		h.error(w, r, err)
 		return

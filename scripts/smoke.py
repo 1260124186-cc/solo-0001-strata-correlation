@@ -223,6 +223,57 @@ def compare(s):
     assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
 
 
+def archive(s):
+    p = create(s, '归档剖面')
+    p = replace(s, p, layers())
+    p = state(s, p, 'seal')
+    p = state(s, p, 'reopen')
+    p = replace(s, p, layers(3000))
+    p = state(s, p, 'seal')
+    assert p['version'] == 6
+    q = sealed(s, '对照剖面')
+    request = dict(left=dict(id=p['id'], version=3), right=dict(id=q['id'], version=3), offset_mm=0)
+    result = s.call('POST', '/api/v1/comparisons', request, 201)
+    summary = s.call('POST', f'/api/v1/profiles/{p["id"]}/archive', dict(through_version=3))
+    assert summary == dict(id=p['id'], archived_total=3, first_live_version=4, latest_version=6)
+    history = s.call('GET', f'/api/v1/profiles/{p["id"]}/history')
+    assert history['total'] == 3 and history['archived'] == 3
+    assert [x['version'] for x in history['items']] == [4, 5, 6]
+    rev3 = s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/3')
+    assert rev3['profile']['version'] == 3 and rev3['event']['action'] == 'seal'
+    assert rev3['profile']['layers'][0]['bottom_mm'] == 4000
+    assert s.call('POST', '/api/v1/comparisons', request) == result
+    diff = s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=3&to=6')
+    assert diff['from_version'] == 3 and diff['to_version'] == 6
+    point = s.call('GET', f'/api/v1/profiles/{p["id"]}/at?depth_mm=100&version=3')
+    assert point['layer']['rock'] == 'sandstone'
+    p = state(s, p, 'reopen')
+    assert p['version'] == 7
+    s.call('POST', f'/api/v1/profiles/{p["id"]}/archive', dict(through_version=3), 409)
+    s.call('POST', f'/api/v1/profiles/{p["id"]}/archive', dict(through_version=99), 422)
+    s.call('POST', f'/api/v1/profiles/{p["id"]}/archive', dict(through_version=7), 409)
+    s.call('POST', f'/api/v1/profiles/{p["id"]}/archive', dict(through_version=0), 422)
+    s.call('POST', f'/api/v1/profiles/{p["id"]}/archive', dict(), 422)
+    s.call('POST', f'/api/v1/profiles/{p["id"]}/archive', dict(through_version=4, extra=True), 422)
+    s.call('POST', f'/api/v1/profiles/prf_{"0"*32}/archive', dict(through_version=1), 404)
+    s.stop()
+    s.start()
+    history = s.call('GET', f'/api/v1/profiles/{p["id"]}/history')
+    assert history['total'] == 4 and history['archived'] == 3
+    assert [x['version'] for x in history['items']] == [4, 5, 6, 7]
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/3') == rev3
+    assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+    summary = s.call('POST', f'/api/v1/profiles/{p["id"]}/archive', dict(through_version=6))
+    assert summary['archived_total'] == 6 and summary['first_live_version'] == 7
+    history = s.call('GET', f'/api/v1/profiles/{p["id"]}/history')
+    assert history['total'] == 1 and [x['version'] for x in history['items']] == [7]
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/1')['event']['action'] == 'create'
+    s.stop()
+    s.start()
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/5')['profile']['version'] == 5
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}')['version'] == 7
+
+
 def browse(s):
     a = sealed(s, '赤石北剖面')
     b = create(s, '赤石南剖面')
@@ -245,9 +296,9 @@ def browse(s):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'archive', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'archive'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

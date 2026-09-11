@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"io"
 	"os"
 	"path/filepath"
@@ -45,6 +46,12 @@ func readSnapshot(path string) (State, error) {
 	if err = json.Unmarshal(env.Data, &state); err != nil {
 		return State{}, err
 	}
+	// Schema 1 snapshots predate the archive store; normalize them in memory
+	// so validation and the next write use the current layout.
+	if state.Archived == nil {
+		state.Archived = map[string][]geology.Revision{}
+	}
+	state.Schema = SchemaVersion
 	if err = state.Validate(); err != nil {
 		return State{}, fmt.Errorf("snapshot validation: %w", err)
 	}

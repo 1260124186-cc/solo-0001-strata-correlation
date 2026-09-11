@@ -7,10 +7,11 @@ import (
 )
 
 type HistoryPage struct {
-	Items  []geology.Event `json:"items"`
-	Total  int             `json:"total"`
-	Offset int             `json:"offset"`
-	Limit  int             `json:"limit"`
+	Items    []geology.Event `json:"items"`
+	Total    int             `json:"total"`
+	Offset   int             `json:"offset"`
+	Limit    int             `json:"limit"`
+	Archived int             `json:"archived"`
 }
 
 func (s *Service) Revision(ctx context.Context, id string, version int) (geology.Revision, error) {
@@ -34,6 +35,7 @@ func (s *Service) History(ctx context.Context, id string, offset, limit int) (Hi
 			return geology.Missing("剖面不存在")
 		}
 		result.Total = len(history)
+		result.Archived = len(state.Archived[id])
 		start := min(offset, len(history))
 		end := min(start+limit, len(history))
 		for i := start; i < end; i++ {

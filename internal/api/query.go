@@ -6,6 +6,10 @@ import (
 	"strconv"
 )
 
+// maxVersion bounds version parameters. Versions keep increasing beyond the
+// live-history cap as old prefixes are archived, so the bound is generous.
+const maxVersion = 1000000
+
 func query(raw string, allowed ...string) (url.Values, error) {
 	values, err := url.ParseQuery(raw)
 	if err != nil {

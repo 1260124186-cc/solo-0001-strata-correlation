@@ -88,9 +88,11 @@ func normalizedReason(reason string) (string, error) {
 func appendRevision(state *persistence.State, revision geology.Revision) error {
 	history := state.Histories[revision.Profile.ID]
 	if len(history) >= 500 {
-		return geology.Conflict("单个剖面最多保留 500 个版本")
+		return geology.Conflict("单个剖面最多保留 500 个未归档版本，请先归档更早的版本")
 	}
-	if revision.Profile.Version != len(history)+1 {
+	// Version numbers continue after the archived prefix; archiving never
+	// renumbers existing revisions.
+	if revision.Profile.Version != len(state.Archived[revision.Profile.ID])+len(history)+1 {
 		return geology.Conflict("版本顺序不一致")
 	}
 	if err := revision.Profile.Validate(); err != nil {

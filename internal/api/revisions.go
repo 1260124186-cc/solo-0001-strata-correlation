@@ -33,7 +33,7 @@ func (h *Handler) reopen(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) revision(w http.ResponseWriter, r *http.Request) {
-	version, err := integer(r.PathValue("version"), "version", 0, 1, 500)
+	version, err := integer(r.PathValue("version"), "version", 0, 1, maxVersion)
 	if err != nil {
 		h.error(w, r, err)
 		return
@@ -44,6 +44,20 @@ func (h *Handler) revision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, http.StatusOK, revision)
+}
+
+func (h *Handler) archive(w http.ResponseWriter, r *http.Request) {
+	var input catalog.ArchiveVersions
+	if err := decode(w, r, &input); err != nil {
+		h.error(w, r, err)
+		return
+	}
+	result, err := h.service.Archive(r.Context(), r.PathValue("id"), input)
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	respond(w, http.StatusOK, result)
 }
 
 func (h *Handler) history(w http.ResponseWriter, r *http.Request) {

@@ -8,24 +8,42 @@ import (
 	"reflect"
 )
 
+// SchemaVersion is the current snapshot layout. Schema 2 adds the archived
+// revision store; schema 1 snapshots load with an empty archive.
+const SchemaVersion = 2
+
 type State struct {
 	Schema      int                           `json:"schema"`
 	Histories   map[string][]geology.Revision `json:"histories"`
+	Archived    map[string][]geology.Revision `json:"archived"`
 	Comparisons map[string]correlation.Result `json:"comparisons"`
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{
+		Schema:      SchemaVersion,
+		Histories:   map[string][]geology.Revision{},
+		Archived:    map[string][]geology.Revision{},
+		Comparisons: map[string]correlation.Result{},
+	}
 }
 
 func (s State) Clone() State {
 	out := emptyState()
+	out.Schema = s.Schema
 	for id, revisions := range s.Histories {
 		copies := make([]geology.Revision, len(revisions))
 		for i, r := range revisions {
 			copies[i] = r.Clone()
 		}
 		out.Histories[id] = copies
+	}
+	for id, revisions := range s.Archived {
+		copies := make([]geology.Revision, len(revisions))
+		for i, r := range revisions {
+			copies[i] = r.Clone()
+		}
+		out.Archived[id] = copies
 	}
 	for id, result := range s.Comparisons {
 		out.Comparisons[id] = result.Clone()
@@ -41,26 +59,47 @@ func (s State) Latest(id string) (geology.Profile, error) {
 	return history[len(history)-1].Profile.Clone(), nil
 }
 
+// Revision locates a version in the archive (oldest contiguous prefix of
+// versions) or in the live history. Version numbers never change when a
+// prefix is archived: the archived chain and the live chain together still
+// hold versions 1..N in order.
 func (s State) Revision(id string, version int) (geology.Revision, error) {
 	history, ok := s.Histories[id]
 	if !ok {
 		return geology.Revision{}, geology.Missing("剖面不存在")
 	}
-	if version < 1 || version > len(history) {
+	archived := s.Archived[id]
+	if version < 1 || version > len(archived)+len(history) {
 		return geology.Revision{}, geology.Missing("历史版本不存在")
 	}
-	return history[version-1].Clone(), nil
+	if version <= len(archived) {
+		return archived[version-1].Clone(), nil
+	}
+	return history[version-len(archived)-1].Clone(), nil
 }
 
 func (s State) Validate() error {
-	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
+	if s.Schema < 1 || s.Schema > SchemaVersion || s.Histories == nil || s.Archived == nil || s.Comparisons == nil {
 		return fmt.Errorf("unsupported snapshot shape")
+	}
+	for id, archived := range s.Archived {
+		if _, ok := s.Histories[id]; !ok {
+			return fmt.Errorf("archived revisions without profile %s", id)
+		}
+		if len(archived) == 0 {
+			return fmt.Errorf("empty archive %s", id)
+		}
 	}
 	for id, history := range s.Histories {
 		if len(history) == 0 {
 			return fmt.Errorf("empty history %s", id)
 		}
-		for i, r := range history {
+		// The archived prefix and the live history form one chain: versions
+		// 1..N in order, so checks stay identical to the pre-archive form.
+		chain := make([]geology.Revision, 0, len(s.Archived[id])+len(history))
+		chain = append(chain, s.Archived[id]...)
+		chain = append(chain, history...)
+		for i, r := range chain {
 			if r.Profile.ID != id || r.Profile.Version != i+1 || r.Event.Version != i+1 || !r.Event.At.Equal(r.Profile.UpdatedAt) {
 				return fmt.Errorf("inconsistent revision %s/%d", id, i+1)
 			}
@@ -75,7 +114,7 @@ func (s State) Validate() error {
 					return fmt.Errorf("invalid initial revision")
 				}
 			} else {
-				before := history[i-1].Profile
+				before := chain[i-1].Profile
 				if !before.CreatedAt.Equal(r.Profile.CreatedAt) || r.Profile.UpdatedAt.Before(before.UpdatedAt) {
 					return fmt.Errorf("invalid revision chronology")
 				}

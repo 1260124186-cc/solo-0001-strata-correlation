@@ -30,6 +30,7 @@ func New(service *catalog.Service, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("POST /api/v1/profiles/{id}/reopen", h.reopen)
 	mux.HandleFunc("GET /api/v1/profiles/{id}/history", h.history)
 	mux.HandleFunc("GET /api/v1/profiles/{id}/revisions/{version}", h.revision)
+	mux.HandleFunc("POST /api/v1/profiles/{id}/archive", h.archive)
 	mux.HandleFunc("POST /api/v1/comparisons", h.compare)
 	mux.HandleFunc("GET /api/v1/comparisons", h.comparisons)
 	mux.HandleFunc("GET /api/v1/comparisons/{id}", h.comparison)
