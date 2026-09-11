@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import signal
 import subprocess
@@ -179,11 +180,17 @@ def seal(s):
         except urllib.error.HTTPError as error:
             response = error
         with response:
-            response.read()
-            return response.status
+            return response.status, response.read()
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        codes = list(pool.map(edit, ['东岭剖面', '西岭剖面']))
-    assert sorted(codes) == [200, 409], codes
+        results = list(pool.map(edit, ['东岭剖面', '西岭剖面']))
+    codes = sorted(status for status, _ in results)
+    assert codes == [200, 409], codes
+    rejected = json.loads(next(payload for status, payload in results if status == 409))
+    assert rejected['error']['code'] == 'conflict'
+    info = rejected['error']['conflict']
+    assert info['expected_version'] == 4 and info['current_version'] == 5 and info['current_state'] == 'draft'
+    assert info['resource'] == f'/api/v1/profiles/{p["id"]}'
+    assert re.fullmatch(r'sha256:[0-9a-f]{64}', info['fingerprint'])
     current = s.call('GET', f'/api/v1/profiles/{p["id"]}')
     assert current['version'] == 5
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/3') == locked
@@ -197,6 +204,56 @@ def seal(s):
     s.stop()
     s.start()
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == current
+
+
+def conflict(s):
+    p = replace(s, create(s, '冲突剖面'), layers())
+    snapshot = (s.directory / 'data' / 'strata.json').read_bytes()
+    stale = p['version'] - 1
+    writes = [
+        ('PUT', f'/api/v1/profiles/{p["id"]}', dict(expected_version=stale, metadata=dict(name='过期改名', site=p['site'], depth_mm=p['depth_mm']), reason='过期版本重试')),
+        ('PUT', f'/api/v1/profiles/{p["id"]}/layers', dict(expected_version=stale, layers=layers(), reason='过期版本重试')),
+        ('POST', f'/api/v1/profiles/{p["id"]}/seal', dict(expected_version=stale, reason='过期版本重试')),
+        ('POST', f'/api/v1/profiles/{p["id"]}/reopen', dict(expected_version=stale, reason='过期版本重试')),
+    ]
+    bodies = [s.call(method, path, body, 409) for method, path, body in writes]
+    for body in bodies:
+        error = body['error']
+        assert error['code'] == 'conflict' and '当前版本' in error['detail']
+        info = error['conflict']
+        assert info['expected_version'] == stale and info['current_version'] == p['version']
+        assert info['current_state'] == 'draft'
+        assert info['resource'] == f'/api/v1/profiles/{p["id"]}'
+        assert re.fullmatch(r'sha256:[0-9a-f]{64}', info['fingerprint'])
+    assert len({json.dumps(body, sort_keys=True) for body in bodies}) == 1
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == p
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}/history')['total'] == p['version']
+    assert (s.directory / 'data' / 'strata.json').read_bytes() == snapshot
+    info = bodies[0]['error']['conflict']
+    with urllib.request.urlopen(s.url + info['resource'], timeout=10) as response:
+        assert response.headers['Profile-Fingerprint'] == info['fingerprint']
+        assert json.loads(response.read())['version'] == info['current_version']
+    updated = s.call('PUT', f'/api/v1/profiles/{p["id"]}',
+                     dict(expected_version=info['current_version'],
+                          metadata=dict(name='按最新状态改名', site=p['site'], depth_mm=p['depth_mm']),
+                          reason='基于冲突信息重试'))
+    assert updated['version'] == info['current_version'] + 1 and updated['name'] == '按最新状态改名'
+    sealed_p = state(s, updated, 'seal')
+    stale_reopen = s.call('POST', f'/api/v1/profiles/{p["id"]}/reopen',
+                          dict(expected_version=updated['version'], reason='过期版本重试'), 409)
+    info = stale_reopen['error']['conflict']
+    assert info['expected_version'] == updated['version'] and info['current_version'] == sealed_p['version']
+    assert info['current_state'] == 'sealed'
+    locked = s.call('PUT', f'/api/v1/profiles/{p["id"]}/layers',
+                    dict(expected_version=sealed_p['version'], layers=layers(), reason='锁定后修改'), 409)
+    info = locked['error']['conflict']
+    assert info['expected_version'] == info['current_version'] == sealed_p['version']
+    assert info['current_state'] == 'sealed'
+    s.stop()
+    s.start()
+    with urllib.request.urlopen(s.url + info['resource'], timeout=10) as response:
+        response.read()
+        assert response.headers['Profile-Fingerprint'] == info['fingerprint']
 
 
 def compare(s):
@@ -245,9 +302,9 @@ def browse(s):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'conflict', 'compare', 'browse', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'conflict', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

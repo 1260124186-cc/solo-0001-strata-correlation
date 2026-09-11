@@ -49,7 +49,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
   -d '{"expected_version":2,"reason":"分层已核对"}'
 ```
 
-锁定成功返回版本 3。修改必须携带当前 `expected_version`；相同版本的并发请求只有一个成功，其余得到 HTTP 409。`ETag` 仅描述响应版本，写入以 JSON 中的 `expected_version` 为准。已锁定剖面需要通过 `/reopen` 重新打开，新版本不会改变历史记录。
+锁定成功返回版本 3。修改必须携带当前 `expected_version`；相同版本的并发请求只有一个成功，其余得到 HTTP 409 和结构化冲突信息（见“HTTP 接口”一节）。`ETag` 仅描述响应版本，写入以 JSON 中的 `expected_version` 为准；剖面响应同时携带 `Profile-Fingerprint` 头，值为当前内容的稳定指纹。已锁定剖面需要通过 `/reopen` 重新打开，新版本不会改变历史记录。
 
 ## 对比两个锁定版本
 
@@ -72,6 +72,14 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 ## HTTP 接口
 
 接口统一前缀 `/api/v1`，请求体类型 `application/json`，最大 4 MiB；拒绝未知 JSON 字段及多个连续 JSON 对象。应用错误采用 `{"error":{"code":"invalid","field":"depth_mm","detail":"..."}}`。HTTP 422 表示字段错误，409 表示状态或版本冲突，404 表示资源缺失，415 表示请求类型错误，413 表示体积超限，500 表示内部故障。不存在的路由和不支持的方法使用 Go HTTP 的 404/405 响应。
+
+四条写入路径（`PUT /profiles/{id}`、`PUT /profiles/{id}/layers`、`POST /profiles/{id}/seal`、`POST /profiles/{id}/reopen`）因版本或状态冲突被拒绝时，响应为 HTTP 409、`code` 为 `conflict`，并附带同一套结构化信息：
+
+```json
+{"error":{"code":"conflict","detail":"预期版本 2，当前版本 3","conflict":{"expected_version":2,"current_version":3,"current_state":"draft","fingerprint":"sha256:…","resource":"/api/v1/profiles/<profile-id>"}}}
+```
+
+`conflict` 描述拒绝时刻的服务端状态：`expected_version` 是请求携带的期望版本，`current_version` 和 `current_state` 是当前版本与状态，`fingerprint` 是当前内容的稳定指纹（同一状态在任何进程和重启后都得到同一值），`resource` 是重新读取资料的定位。服务不自动合并或重试，冲突响应不产生版本、事件或快照写入。客户端可按 `resource` 重新读取资料，用响应头 `Profile-Fingerprint` 核对指纹一致后，以 `current_version` 作为新的 `expected_version` 重新构造一次原子更新；若期间又有其他写入，新的冲突响应会给出更新后的信息。
 
 | 方法与路径 | 输入或行为 |
 | --- | --- |
@@ -118,9 +126,9 @@ python3 scripts/smoke.py all
 STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 ```
 
-**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
+**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / conflict / compare / browse` 五个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突与冲突响应结构、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
 
 ## 目录
 

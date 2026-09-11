@@ -21,28 +21,28 @@ func (r Revision) Clone() Revision {
 
 func CheckEditable(p Profile, expected int) error {
 	if p.Version != expected {
-		return VersionConflict(expected, p.Version)
+		return VersionConflict(p, expected)
 	}
 	if p.State != Draft {
-		return Conflict("剖面已锁定，请先重新打开")
+		return StateConflict(p, expected, "剖面已锁定，请先重新打开")
 	}
 	return nil
 }
 
 func ChangeState(p Profile, target State, expected int, reason string, now time.Time) (Revision, error) {
 	if p.Version != expected {
-		return Revision{}, VersionConflict(expected, p.Version)
+		return Revision{}, VersionConflict(p, expected)
 	}
 	if err := Text("reason", reason, 1, 500); err != nil {
 		return Revision{}, err
 	}
 	if p.State == target {
-		return Revision{}, Conflict("剖面已经处于目标状态")
+		return Revision{}, StateConflict(p, expected, "剖面已经处于目标状态")
 	}
 	action := "reopen"
 	if target == Sealed {
 		if !CoverageOf(p).Ready {
-			return Revision{}, Conflict("分层存在深度缺口，不能锁定")
+			return Revision{}, StateConflict(p, expected, "分层存在深度缺口，不能锁定")
 		}
 		action = "seal"
 	} else if target != Draft {

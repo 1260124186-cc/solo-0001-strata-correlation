@@ -66,6 +66,9 @@ func fail(w http.ResponseWriter, r *http.Request, err error, logger *slog.Logger
 		case "too_large":
 			status = http.StatusRequestEntityTooLarge
 		}
+		if problem.Conflict != nil {
+			problem.Conflict.Resource = "/api/v1/profiles/" + problem.Conflict.ProfileID
+		}
 		respond(w, status, map[string]any{"error": problem})
 		return
 	}

@@ -1,6 +1,9 @@
 package geology
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"time"
 	"unicode"
@@ -72,6 +75,17 @@ func NormalizeMetadata(m Metadata) (Metadata, error) {
 func (p Profile) Clone() Profile {
 	p.Layers = append([]Layer{}, p.Layers...)
 	return p
+}
+
+// Fingerprint 返回当前剖面内容的稳定指纹：同一状态在任何进程和重启后都得到同一值。
+// 客户端用它确认重新读取到的资料与冲突响应描述的状态一致，再基于该状态重新构造原子更新。
+func (p Profile) Fingerprint() string {
+	canonical, err := json.Marshal(p)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(canonical)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func (p Profile) Validate() error {

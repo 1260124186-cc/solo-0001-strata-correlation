@@ -9,6 +9,7 @@ import (
 
 func profileResponse(w http.ResponseWriter, status int, p geology.Profile) {
 	w.Header().Set("ETag", fmt.Sprintf("\"%s-v%d\"", p.ID, p.Version))
+	w.Header().Set("Profile-Fingerprint", p.Fingerprint())
 	respond(w, status, p)
 }
 
