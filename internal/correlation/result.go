@@ -47,6 +47,9 @@ type Result struct {
 	EqualMM    int64        `json:"equal_mm"`
 	Similarity *float64     `json:"similarity"`
 	CreatedAt  time.Time    `json:"created_at"`
+	// Supersedes records the older result this one was refreshed from.
+	// Empty for results created directly from POST /comparisons.
+	Supersedes string `json:"supersedes,omitempty"`
 }
 
 func (r Request) Validate() error {

@@ -67,6 +67,22 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 相同输入和算法版本生成同一编号，首次返回 HTTP 201，重复请求返回 HTTP 200 和原结果。交换左右或修改偏移属于不同输入。`GET /api/v1/comparisons/{id}/csv` 导出固定字段的区间 CSV，字段只包含数值、岩性代码和关系代码。
 
+### 对比结果的时效与重新生成
+
+对比结果保存后不可变，但它引用的历史版本可能被后续修订超越。`GET /api/v1/comparisons/{id}` 和对比列表中的每个结果都带 `currency` 对象，按读取时的最新版本说明时效：
+
+```json
+"currency": {
+  "stale": true,
+  "left": {"referenced_version": 3, "latest_version": 6, "current": false},
+  "right": {"referenced_version": 3, "latest_version": 3, "current": true}
+}
+```
+
+`stale` 为 `true` 表示至少一侧引用的版本已不再是当前版本，复核时应重新确认结论。时效只是读取时的说明：旧结果继续可读、可导出，不会因为出现了新版本而被修改或失效。
+
+`POST /api/v1/comparisons/{id}/refresh` 基于同一输入（相同两个剖面、相同偏移）和两侧各自的最新锁定版本重新生成一条对比。新结果有独立编号，并通过 `supersedes` 记录它取代的旧结果；响应同时给出新旧结果的差异，包括共同区间、已知与一致长度、相似度、分段与标志层数量的前后值和差值。两侧最新版本都已锁定才能重新生成；结果已基于最新版本时返回 HTTP 409。若相同输入的结果已经存在，则复用该结果并返回 HTTP 200，否则新建返回 HTTP 201。旧结果始终保留，新旧结果可以对照查阅。
+
 `POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
 ## HTTP 接口
@@ -91,9 +107,10 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /profiles/{id}/diff` | 必填 `from, to`，查看同一剖面从旧版本到新版本的差异 |
 | `POST /comparison-offsets` | 根据共同标志层建议偏移 |
 | `POST /comparisons` | `left, right, offset_mm`，生成或复用对比 |
-| `GET /comparisons` | 可选 `profile_id, offset, limit` |
-| `GET /comparisons/{id}` | 已保存的完整对比结果 |
+| `GET /comparisons` | 可选 `profile_id, offset, limit`，条目含 `currency` 时效 |
+| `GET /comparisons/{id}` | 已保存的完整对比结果，含 `currency` 时效 |
 | `GET /comparisons/{id}/csv` | 区间 CSV |
+| `POST /comparisons/{id}/refresh` | 基于同一输入和最新锁定版本重新生成，返回新结果与新旧差异 |
 
 上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
 
@@ -120,7 +137,7 @@ STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 
 **测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、对比结果时效与重新生成、CSV、列表筛选与分页。
 
 ## 目录
 

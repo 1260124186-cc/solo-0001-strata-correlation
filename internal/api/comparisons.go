@@ -54,18 +54,32 @@ func (h *Handler) comparisons(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) csv(w http.ResponseWriter, r *http.Request) {
-	result, err := h.service.Comparison(r.Context(), r.PathValue("id"))
+	report, err := h.service.Comparison(r.Context(), r.PathValue("id"))
 	if err != nil {
 		h.error(w, r, err)
 		return
 	}
 	var buf bytes.Buffer
-	if err = correlation.WriteCSV(&buf, result); err != nil {
+	if err = correlation.WriteCSV(&buf, report.Result); err != nil {
 		h.error(w, r, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+result.ID+".csv\"")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+report.ID+".csv\"")
 	w.WriteHeader(http.StatusOK)
 	w.Write(buf.Bytes())
+}
+
+func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
+	outcome, reused, err := h.service.Refresh(r.Context(), r.PathValue("id"))
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	status := http.StatusCreated
+	if reused {
+		status = http.StatusOK
+	}
+	w.Header().Set("Location", "/api/v1/comparisons/"+outcome.Result.ID)
+	respond(w, status, outcome)
 }

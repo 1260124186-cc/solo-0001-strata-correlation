@@ -101,11 +101,39 @@ func (s State) Validate() error {
 		if err != nil {
 			return err
 		}
+		computed.Supersedes = result.Supersedes
 		expected, _ := json.Marshal(computed)
 		actual, _ := json.Marshal(result)
 		if string(expected) != string(actual) {
 			return fmt.Errorf("comparison data mismatch")
 		}
+		if err = s.validateLineage(result); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateLineage checks that a refreshed result links to an existing origin
+// with the same profiles and offset, and that versions only move forward.
+// Version monotonicity also makes lineage cycles impossible.
+func (s State) validateLineage(result correlation.Result) error {
+	if result.Supersedes == "" {
+		return nil
+	}
+	origin, ok := s.Comparisons[result.Supersedes]
+	if !ok {
+		return fmt.Errorf("comparison %s supersedes missing result", result.ID)
+	}
+	if result.Supersedes == result.ID {
+		return fmt.Errorf("comparison %s supersedes itself", result.ID)
+	}
+	o, n := origin.Request, result.Request
+	if o.Left.ID != n.Left.ID || o.Right.ID != n.Right.ID || o.OffsetMM != n.OffsetMM {
+		return fmt.Errorf("comparison %s lineage changed the input", result.ID)
+	}
+	if o.Left.Version > n.Left.Version || o.Right.Version > n.Right.Version || o == n {
+		return fmt.Errorf("comparison %s lineage must move versions forward", result.ID)
 	}
 	return nil
 }

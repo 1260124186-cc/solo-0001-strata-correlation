@@ -216,11 +216,52 @@ def compare(s):
     c = state(s, replace(s, create(s, '待识别岩性'), [dict(top_mm=0, bottom_mm=10000, rock='unknown')]), 'seal')
     unknown = s.call('POST', '/api/v1/comparisons', {**request, 'right': dict(id=c['id'], version=3)}, 201)
     assert unknown['known_mm'] == 0 and unknown['similarity'] is None
-    state(s, a, 'reopen')
+    fresh = s.call('GET', f'/api/v1/comparisons/{result["id"]}')
+    assert fresh['currency'] == {'stale': False,
+                                 'left': {'referenced_version': 3, 'latest_version': 3, 'current': True},
+                                 'right': {'referenced_version': 3, 'latest_version': 3, 'current': True}}
+    reopened = state(s, a, 'reopen')
     assert s.call('POST', '/api/v1/comparisons', request) == result
+    stale = s.call('GET', f'/api/v1/comparisons/{result["id"]}')
+    assert stale['currency']['stale'] is True
+    assert stale['currency']['left'] == {'referenced_version': 3, 'latest_version': 4, 'current': False}
+    assert stale['currency']['right']['current'] is True
+    assert {k: v for k, v in stale.items() if k != 'currency'} == result
+    page = s.call('GET', f'/api/v1/comparisons?profile_id={a["id"]}')
+    assert page['total'] > 0 and all('currency' in item for item in page['items'])
+    s.call('POST', f'/api/v1/comparisons/{result["id"]}/refresh', expected=409)
+    resealed = state(s, replace(s, reopened, layers(5000)), 'seal')
+    assert resealed['version'] == 6
+    outcome = s.call('POST', f'/api/v1/comparisons/{result["id"]}/refresh', expected=201)
+    refreshed = outcome['result']
+    assert refreshed['id'] != result['id'] and refreshed['supersedes'] == result['id']
+    assert refreshed['request'] == {'left': {'id': a['id'], 'version': 6},
+                                    'right': {'id': b['id'], 'version': 3}, 'offset_mm': 0}
+    assert refreshed['currency']['stale'] is False
+    assert refreshed['equal_mm'] == 9000 and refreshed['similarity'] == .9
+    diff = outcome['difference']
+    assert diff['from'] == result['id'] and diff['to'] == refreshed['id']
+    assert diff['overlap_mm'] == {'before': 10000, 'after': 10000, 'delta': 0}
+    assert diff['equal_mm'] == {'before': 8000, 'after': 9000, 'delta': 1000}
+    assert diff['similarity'] == {'before': .8, 'after': .9, 'delta': .9 - .8}
+    kept = s.call('GET', f'/api/v1/comparisons/{result["id"]}')
+    assert kept['currency']['stale'] is True and kept['currency']['left']['latest_version'] == 6
+    assert {k: v for k, v in kept.items() if k != 'currency'} == result
+    rows = list(csv.DictReader(io.StringIO(s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv', raw=True))))
+    assert len(rows) == 3 and sum(int(r['thickness_mm']) for r in rows) == 10000
+    s.call('POST', f'/api/v1/comparisons/{refreshed["id"]}/refresh', expected=409)
+    manual = s.call('POST', '/api/v1/comparisons', refreshed['request'])
+    assert manual == {k: v for k, v in refreshed.items() if k != 'currency'}
+    again = s.call('POST', f'/api/v1/comparisons/{result["id"]}/refresh', expected=200)
+    assert again['result']['id'] == refreshed['id']
+    assert again['difference']['from'] == result['id'] and again['difference']['to'] == refreshed['id']
     s.stop()
     s.start()
-    assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+    restored = s.call('GET', f'/api/v1/comparisons/{result["id"]}')
+    assert {k: v for k, v in restored.items() if k != 'currency'} == result
+    assert restored['currency']['stale'] is True
+    followup = s.call('GET', f'/api/v1/comparisons/{refreshed["id"]}')
+    assert followup['supersedes'] == result['id'] and followup['currency']['stale'] is False
 
 
 def browse(s):
