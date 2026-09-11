@@ -21,6 +21,10 @@ type ReplaceLayers struct {
 type StateChange struct {
 	ExpectedVersion int    `json:"expected_version"`
 	Reason          string `json:"reason"`
+	// RequireReview makes sealing conditional on a stored passing review of
+	// the current revision. Checked inside the same transaction that appends
+	// the seal revision, so a rejected seal never leaves a partial version.
+	RequireReview bool `json:"require_review"`
 }
 
 func (s *Service) Edit(ctx context.Context, id string, input EditMetadata) (geology.Profile, error) {
@@ -102,6 +106,11 @@ func (s *Service) Change(ctx context.Context, id string, target geology.State, i
 		revision, err := geology.ChangeState(p, target, input.ExpectedVersion, reason, nextTime(p.UpdatedAt))
 		if err != nil {
 			return false, err
+		}
+		if target == geology.Sealed && input.RequireReview {
+			if err = requirePassingReview(*state, p.ID, p.Version); err != nil {
+				return false, err
+			}
 		}
 		if err = appendRevision(state, revision); err != nil {
 			return false, err

@@ -9,13 +9,14 @@ import (
 )
 
 type State struct {
-	Schema      int                           `json:"schema"`
-	Histories   map[string][]geology.Revision `json:"histories"`
-	Comparisons map[string]correlation.Result `json:"comparisons"`
+	Schema      int                             `json:"schema"`
+	Histories   map[string][]geology.Revision   `json:"histories"`
+	Comparisons map[string]correlation.Result   `json:"comparisons"`
+	Reviews     map[string]geology.ReviewResult `json:"reviews"`
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}, Reviews: map[string]geology.ReviewResult{}}
 }
 
 func (s State) Clone() State {
@@ -29,6 +30,9 @@ func (s State) Clone() State {
 	}
 	for id, result := range s.Comparisons {
 		out.Comparisons[id] = result.Clone()
+	}
+	for id, review := range s.Reviews {
+		out.Reviews[id] = review.Clone()
 	}
 	return out
 }
@@ -106,6 +110,49 @@ func (s State) Validate() error {
 		if string(expected) != string(actual) {
 			return fmt.Errorf("comparison data mismatch")
 		}
+	}
+	for id, review := range s.Reviews {
+		if err := s.validateReview(id, review); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateReview recomputes the conclusion from the explicit target revision,
+// so a stored review can never silently change after later edits and tampered
+// records prevent startup.
+func (s State) validateReview(id string, review geology.ReviewResult) error {
+	request := geology.ReviewRequest{Target: review.Target, Partners: review.Partners}
+	if id != review.ID || id != request.Key() || review.RulesVersion != geology.ReviewRulesVersion || review.CreatedAt.IsZero() {
+		return fmt.Errorf("invalid review identity %s", id)
+	}
+	if err := request.Validate(); err != nil {
+		return fmt.Errorf("invalid review %s: %w", id, err)
+	}
+	if err := geology.Text("reason", review.Reason, 1, 500); err != nil {
+		return fmt.Errorf("invalid review %s: %w", id, err)
+	}
+	targetRevision, err := s.Revision(review.Target.ID, review.Target.Version)
+	if err != nil {
+		return fmt.Errorf("review %s target: %w", id, err)
+	}
+	partners := make([]geology.Profile, len(review.Partners))
+	for i, ref := range review.Partners {
+		r, err := s.Revision(ref.ID, ref.Version)
+		if err != nil {
+			return fmt.Errorf("review %s partner: %w", id, err)
+		}
+		partners[i] = r.Profile
+	}
+	computed, err := geology.Review(targetRevision.Profile, partners, request, review.Reason, review.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("review %s: %w", id, err)
+	}
+	expected, _ := json.Marshal(computed)
+	actual, _ := json.Marshal(review)
+	if string(expected) != string(actual) {
+		return fmt.Errorf("review data mismatch %s", id)
 	}
 	return nil
 }

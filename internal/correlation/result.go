@@ -10,10 +10,9 @@ import (
 
 const Algorithm = "interval-v1"
 
-type Reference struct {
-	ID      string `json:"id"`
-	Version int    `json:"version"`
-}
+// Reference is the explicit revision reference used by both reviews and
+// comparisons.
+type Reference = geology.Reference
 
 type Request struct {
 	Left     Reference `json:"left"`

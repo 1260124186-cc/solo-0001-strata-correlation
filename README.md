@@ -69,6 +69,37 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 `POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
+## 锁定前质量审查
+
+锁定默认只检查深度覆盖；调用方可以在锁定请求中加入 `"require_review": true`，要求该版本先通过质量审查。审查是独立于版本链的不可变资料，针对**明确的剖面版本**进行；剖面后续修改只会追加新版本，已经完成的审查结论不会随之改变。
+
+```bash
+curl -sS http://127.0.0.1:8093/api/v1/reviews \
+  -H 'Content-Type: application/json' \
+  -d '{"target":{"id":"<profile-id>","version":2},"partners":[],"reason":"锁定前质量审查"}'
+```
+
+审查规则版本为 `rules-v1`，每条发现都给出规则代码、所属字段、深度区间和说明：
+
+| 规则代码 | 含义 |
+| --- | --- |
+| `gap` | 深度缺口（未覆盖区间） |
+| `unknown_lithology` | 岩性为 `unknown` 的分层 |
+| `thin_layer` | 厚度不足 50 毫米的分层 |
+| `unpaired_marker` | 标志层在配对的锁定版本中没有同名（忽略大小写）标志层 |
+
+`partners` 必须显式给出用于标志层配对的**已锁定版本**引用；没有配对对象时传 `[]`，此时所有标志层都判为未配对。发现为空时 `passed` 为 `true`。审查首次创建返回 201，相同目标与配对集重复请求返回 200 和原结论（结论含规则版本与创建时间，结论理由只在首次请求时生效）。
+
+```bash
+curl -sS http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version":2,"reason":"审查通过后锁定","require_review":true}'
+```
+
+门控以该版本**最新一份**审查结论为准：没有结论返回 409（`review_required`）；最新结论不通过返回 422（`review_rejected`，响应同时携带该审查结论），且锁定修订不写入、版本保持不变；最新结论通过才锁定。门控与深度缺口检查都在同一个原子持久化事务内，失败请求不会留下半个版本。不带 `require_review` 的锁定保持原有行为（仅要求覆盖完整）。
+
+`GET /api/v1/reviews/{id}` 读取结论；`GET /api/v1/reviews` 支持 `profile_id`、可选 `version` 与分页，按创建时间倒序排列。重启时服务会依据目标版本快照重算并核对每条结论，损坏或与历史不符的结论会拒绝启动。
+
 ## HTTP 接口
 
 接口统一前缀 `/api/v1`，请求体类型 `application/json`，最大 4 MiB；拒绝未知 JSON 字段及多个连续 JSON 对象。应用错误采用 `{"error":{"code":"invalid","field":"depth_mm","detail":"..."}}`。HTTP 422 表示字段错误，409 表示状态或版本冲突，404 表示资源缺失，415 表示请求类型错误，413 表示体积超限，500 表示内部故障。不存在的路由和不支持的方法使用 Go HTTP 的 404/405 响应。
@@ -84,11 +115,14 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `PUT /profiles/{id}/layers` | `expected_version, reason, layers` 整体替换分层 |
 | `GET /profiles/{id}/coverage` | 缺口、各岩性厚度和能否锁定 |
 | `GET /profiles/{id}/at` | 必填 `depth_mm`，可选 `version`；返回所属层或缺口 |
-| `POST /profiles/{id}/seal` | `expected_version, reason`，锁定当前版本 |
+| `POST /profiles/{id}/seal` | `expected_version, reason, require_review`，锁定当前版本 |
 | `POST /profiles/{id}/reopen` | `expected_version, reason`，重新打开 |
 | `GET /profiles/{id}/history` | 按版本升序列出事件，支持 `offset, limit` |
 | `GET /profiles/{id}/revisions/{version}` | 指定历史版本及事件 |
 | `GET /profiles/{id}/diff` | 必填 `from, to`，查看同一剖面从旧版本到新版本的差异 |
+| `POST /reviews` | `target, partners, reason`，对明确版本执行质量审查 |
+| `GET /reviews` | 可选 `profile_id, version, offset, limit` |
+| `GET /reviews/{id}` | 已保存的审查结论 |
 | `POST /comparison-offsets` | 根据共同标志层建议偏移 |
 | `POST /comparisons` | `left, right, offset_mm`，生成或复用对比 |
 | `GET /comparisons` | 可选 `profile_id, offset, limit` |
@@ -97,13 +131,13 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
 
-单个剖面最多 500 层、500 个历史版本，总深度最大 1000000 毫米。最多 2000 个剖面、10000 个对比结果，总快照上限 64 MiB。岩性支持 `sandstone / mudstone / limestone / shale / conglomerate / unknown`。名称最多 120 字、地点 200 字、说明 2000 字，单层描述 1000 字，标志层名称 80 字，修订理由 1–500 字。标志层名称在同一剖面内忽略大小写后必须唯一。
+单个剖面最多 500 层、500 个历史版本，总深度最大 1000000 毫米。最多 2000 个剖面、10000 个对比结果、20000 条审查结论，总快照上限 64 MiB。岩性支持 `sandstone / mudstone / limestone / shale / conglomerate / unknown`。名称最多 120 字、地点 200 字、说明 2000 字，单层描述 1000 字，标志层名称 80 字，修订理由 1–500 字。标志层名称在同一剖面内忽略大小写后必须唯一。
 
 差异接口按完整深度区间匹配分层；边界变化展示为原区间移除和新区间增加，相同区间中的岩性或描述修改展示前后值。深度查询使用左闭右开区间，边界点属于其下方分层，剖面底端不属于任何层。
 
 ## 持久化与恢复
 
-数据目录保存 `strata.json` 和 `strata.lock`。每次成功写入将全部状态写到同目录临时文件，执行文件 fsync 后原子替换快照，并对目录执行 fsync。剖面、版本事件和对比结果始终处于同一状态边界；失败的校验不会修改内存或磁盘。
+数据目录保存 `strata.json` 和 `strata.lock`。每次成功写入将全部状态写到同目录临时文件，执行文件 fsync 后原子替换快照，并对目录执行 fsync。剖面、版本事件、对比结果和审查结论始终处于同一状态边界；失败的校验不会修改内存或磁盘。
 
 快照包含 SHA-256 校验值。启动时检查校验值、版本连续性、状态转换及对比可重复性，遇到损坏拒绝启动。进程在替换前中断保留旧快照，替换后中断使用新快照。同目录遗留的 `.strata-*` 临时文件不会参与恢复，可在服务停止时清理。若替换后同步目录失败，服务保留新内存状态并停止后续写入，健康状态变为 503；检查磁盘并重启后再读取版本确认结果，不要盲目重放修改。
 
@@ -120,7 +154,7 @@ STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 
 **测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、锁定前质量审查（四类规则、门控锁定、结论不变性与重启恢复）、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
 
 ## 目录
 

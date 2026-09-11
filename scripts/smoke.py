@@ -243,11 +243,108 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def review(s):
+    def make(name):
+        return create(s, name)
+
+    def put(p, values):
+        return replace(s, p, values)
+
+    def review_call(p, version, partners, reason='锁定前质量审查', expected=200):
+        return s.call('POST', '/api/v1/reviews',
+                      dict(target=dict(id=p['id'], version=version), partners=partners, reason=reason), expected)
+
+    def gated_seal(p, expected=200):
+        return s.call('POST', f"/api/v1/profiles/{p['id']}/seal",
+                      dict(expected_version=p['version'], reason='审查通过后锁定', require_review=True), expected)
+
+    bad = [dict(top_mm=0, bottom_mm=4000, rock='sandstone'),
+           dict(top_mm=4000, bottom_mm=4020, rock='limestone'),
+           dict(top_mm=4020, bottom_mm=8000, rock='unknown', marker='孤立标志')]
+    good = [dict(top_mm=0, bottom_mm=4000, rock='sandstone'),
+            dict(top_mm=4000, bottom_mm=10000, rock='mudstone')]
+
+    # Gaps plus the three other rules are reported together.
+    p = put(make('质量审查剖面'), bad)
+    r = review_call(p, 2, [], expected=201)
+    assert r['passed'] is False
+    assert r['counts'] == dict(gaps=1, unknown_layers=1, thin_layers=1, unpaired_markers=1, total=4)
+    assert sorted(f['code'] for f in r['findings']) == ['gap', 'thin_layer', 'unknown_lithology', 'unpaired_marker']
+
+    # Plain sealing and gated sealing both stop at the gap rule for an incomplete draft.
+    state(s, p, 'seal', 409)
+    gated_seal(p, 409)
+
+    # Full coverage but without a stored conclusion surfaces the review gate.
+    p = put(make('覆盖完整但未审查'),
+            [dict(top_mm=0, bottom_mm=4000, rock='sandstone'),
+             dict(top_mm=4000, bottom_mm=10000, rock='mudstone')])
+    body = gated_seal(p, 409)
+    assert body['error']['code'] == 'review_required'
+
+    # Full coverage leaves the three quality findings.
+    p = put(make('完整覆盖待审剖面'),
+            [dict(top_mm=0, bottom_mm=4000, rock='sandstone'),
+             dict(top_mm=4000, bottom_mm=4020, rock='limestone'),
+             dict(top_mm=4020, bottom_mm=10000, rock='unknown', marker='孤立标志')])
+    r = review_call(p, 2, [], expected=201)
+    assert r['counts']['gaps'] == 0 and r['counts']['total'] == 3
+    body = gated_seal(p, 422)
+    assert body['error']['code'] == 'review_rejected' and body['review']['id'] == r['id']
+    current = s.call('GET', f"/api/v1/profiles/{p['id']}")
+    assert current['version'] == 2 and current['state'] == 'draft'
+    assert s.call('POST', '/api/v1/reviews',
+                  dict(target=dict(id=p['id'], version=2), partners=[], reason='重复请求')) == r
+
+    # A passing review of this exact version unseals the gate and seals atomically.
+    p = put(make('审查通过剖面'), good)
+    r = review_call(p, 2, [], expected=201)
+    assert r['passed'] and r['findings'] == []
+    sealed_p = gated_seal(p)
+    assert sealed_p['version'] == 3 and sealed_p['state'] == 'sealed'
+
+    # The old conclusion is pinned to that version; edits cannot rewrite it.
+    p = state(s, sealed_p, 'reopen')
+    p = replace(s, p, [dict(top_mm=0, bottom_mm=10000, rock='conglomerate', marker='新标志')])
+    assert s.call('GET', f"/api/v1/reviews/{r['id']}") == r
+    gated_seal(p, 409)
+
+    # Marker pairing needs an explicit sealed revision carrying the same marker.
+    partner = put(make('标志层伙伴'),
+                  [dict(top_mm=0, bottom_mm=10000, rock='sandstone', marker='新标志')])
+    partner = state(s, partner, 'seal')
+    r2 = review_call(p, p['version'], [dict(id=partner['id'], version=partner['version'])], expected=201)
+    assert r2['passed'], r2
+    gated_seal(p)
+
+    # Invalid review inputs.
+    s.call('POST', '/api/v1/reviews', dict(target=dict(id=p['id'], version=1), reason='缺少配对数组'), 422)
+    s.call('POST', '/api/v1/reviews',
+           dict(target=dict(id=p['id'], version=1), partners=[dict(id=p['id'], version=1)], reason='自身'), 422)
+    draft = create(s, '草稿伙伴')
+    s.call('POST', '/api/v1/reviews',
+           dict(target=dict(id=p['id'], version=1), partners=[dict(id=draft['id'], version=1)], reason='草稿'), 409)
+    s.call('POST', '/api/v1/reviews',
+           dict(target=dict(id=p['id'], version=99), partners=[], reason='缺版本'), 404)
+
+    # Listing and lookup.
+    page = s.call('GET', f"/api/v1/reviews?profile_id={p['id']}&limit=2")
+    assert page['total'] >= 2 and len(page['items']) == 2
+    s.call('GET', '/api/v1/reviews/rvw_' + '0' * 32, expected=404)
+    s.call('GET', '/api/v1/reviews?extra=1', expected=422)
+
+    # Restart must accept the conclusions it wrote and keep them immutable.
+    s.stop()
+    s.start()
+    assert s.call('GET', f"/api/v1/reviews/{r['id']}") == r
+    assert s.call('GET', f"/api/v1/reviews/{r2['id']}") == r2
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'review', 'compare', 'browse', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'review', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

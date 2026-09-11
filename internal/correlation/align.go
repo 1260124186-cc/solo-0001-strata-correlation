@@ -19,7 +19,7 @@ func Align(left, right geology.Profile, request Request, now time.Time) (Result,
 	if left.State != geology.Sealed || right.State != geology.Sealed {
 		return Result{}, geology.Conflict("对比需要已经锁定的历史版本")
 	}
-	if request.Left != (Reference{left.ID, left.Version}) || request.Right != (Reference{right.ID, right.Version}) {
+	if request.Left != (Reference{ID: left.ID, Version: left.Version}) || request.Right != (Reference{ID: right.ID, Version: right.Version}) {
 		return Result{}, geology.Invalid("reference", "历史版本与输入不一致")
 	}
 	result := Result{ID: request.Key(), Algorithm: Algorithm, Request: request, Segments: []Segment{}, Markers: []MarkerPair{}, CreatedAt: now}

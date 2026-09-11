@@ -30,3 +30,19 @@ func Conflict(detail string) error {
 func VersionConflict(want, actual int) error {
 	return Conflict(fmt.Sprintf("预期版本 %d，当前版本 %d", want, actual))
 }
+
+// ReviewRejected carries a failed review and is returned when a sealing
+// request requires a passing review first.
+type ReviewRejected struct {
+	Review ReviewResult
+}
+
+func (e *ReviewRejected) Error() string {
+	return fmt.Sprintf("质量审查未通过：发现 %d 个问题", e.Review.Counts.Total)
+}
+
+// ReviewGate reports that a sealing request requires a passing review that
+// has not been stored for the target revision.
+func ReviewGate(detail string) error {
+	return &Problem{Code: "review_required", Detail: detail}
+}

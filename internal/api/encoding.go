@@ -53,13 +53,21 @@ func decodeError(err error) error {
 }
 
 func fail(w http.ResponseWriter, r *http.Request, err error, logger *slog.Logger) {
+	var rejected *geology.ReviewRejected
+	if errors.As(err, &rejected) {
+		respond(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":  geology.Problem{Code: "review_rejected", Detail: rejected.Error()},
+			"review": rejected.Review,
+		})
+		return
+	}
 	var problem *geology.Problem
 	if errors.As(err, &problem) {
 		status := http.StatusUnprocessableEntity
 		switch problem.Code {
 		case "missing":
 			status = http.StatusNotFound
-		case "conflict":
+		case "conflict", "review_required":
 			status = http.StatusConflict
 		case "media_type":
 			status = http.StatusUnsupportedMediaType
