@@ -33,6 +33,22 @@ curl -sS http://127.0.0.1:8093/api/v1/profiles \
 
 响应为 HTTP 201，包括 `id`、`version: 1`、`state: "draft"`、`layers: []` 和时间戳。将返回的编号用于下面的 `<profile-id>`。
 
+### 研究区归属与配额
+
+每个剖面恰好属于一个**研究区**，归属在创建时确定、之后不可更改。建剖面时可传 `area_id`；省略时归入内置的「默认研究区」（编号固定，配额等于整库上限：2000 个剖面、1000000 个版本）。剖面自身的 JSON 不含研究区字段，归属单独持久化，因此历史版本、事件和对比结果的内容与编号完全不变。
+
+```bash
+curl -sS http://127.0.0.1:8093/api/v1/areas \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"赤石岭研究区","max_profiles":200,"max_versions":20000}'
+```
+
+配额按研究区统计：`max_profiles` 限制该区剖面数（1–2000），`max_versions` 限制该区所有剖面历史版本总数（1–1000000）。新建剖面同时占用一个剖面配额和一个版本配额（版本 1）。研究区名最长 120 字，忽略大小写后全库唯一；最多 64 个研究区（含默认区），默认区配额不可修改。
+
+`GET /api/v1/areas` 列出每个研究区的 `used_profiles / used_versions / free_profiles / free_versions` 及归属剖面编号，`global` 字段同时给出整库用量。拒绝原因会明确指出是哪个研究区、已用多少、上限多少；当研究区尚有余量但整库 2000 个剖面上限已满时，错误信息会同时给出两套数字。两套限制在同一个持久化事务内判定，不会出现「配额说没满、整库却拒绝」的矛盾。`GET /api/v1/profiles?area=<area-id>` 只返回该研究区的剖面。
+
+配额统计全部从快照中的归属关系与历史记录**实时派生**，不依赖内存计数，重启后仍然准确。旧版快照（无研究区维度）在启动时自动迁移：所有已有剖面平滑归入默认研究区，历史读取、对比结果及编号不受影响，迁移结果立即重写落盘。
+
 ```bash
 curl -sS -X PUT "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/layers" \
   -H 'Content-Type: application/json' \
@@ -77,8 +93,11 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | --- | --- |
 | `GET /healthz` | 就绪状态，持久化故障时为 503 |
 | `GET /rocks` | 岩性代码与中文名称 |
-| `POST /profiles` | `name, site, depth_mm, note` |
-| `GET /profiles` | `q, site, state, rock, offset, limit` 筛选与分页 |
+| `POST /areas` | `name, max_profiles, max_versions` 登记研究区及配额 |
+| `GET /areas` | 各研究区归属、配额用量与整库用量 |
+| `GET /areas/{id}` | 单个研究区的配额用量、剩余和归属剖面编号 |
+| `POST /profiles` | `name, site, depth_mm, note, area_id` |
+| `GET /profiles` | `q, site, state, rock, area, offset, limit` 筛选与分页 |
 | `GET /profiles/{id}` | 当前完整剖面 |
 | `PUT /profiles/{id}` | `expected_version, reason, metadata` 整体替换元数据 |
 | `PUT /profiles/{id}/layers` | `expected_version, reason, layers` 整体替换分层 |
@@ -97,13 +116,15 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
 
-单个剖面最多 500 层、500 个历史版本，总深度最大 1000000 毫米。最多 2000 个剖面、10000 个对比结果，总快照上限 64 MiB。岩性支持 `sandstone / mudstone / limestone / shale / conglomerate / unknown`。名称最多 120 字、地点 200 字、说明 2000 字，单层描述 1000 字，标志层名称 80 字，修订理由 1–500 字。标志层名称在同一剖面内忽略大小写后必须唯一。
+单个剖面最多 500 层、500 个历史版本，总深度最大 1000000 毫米。最多 2000 个剖面、10000 个对比结果，总快照上限 64 MiB。研究区配额区间：剖面 1–2000 个、版本总数 1–1000000 个，最多 64 个研究区（含默认区）；研究区名 1–120 字且忽略大小写唯一。岩性支持 `sandstone / mudstone / limestone / shale / conglomerate / unknown`。名称最多 120 字、地点 200 字、说明 2000 字，单层描述 1000 字，标志层名称 80 字，修订理由 1–500 字。标志层名称在同一剖面内忽略大小写后必须唯一。
 
 差异接口按完整深度区间匹配分层；边界变化展示为原区间移除和新区间增加，相同区间中的岩性或描述修改展示前后值。深度查询使用左闭右开区间，边界点属于其下方分层，剖面底端不属于任何层。
 
 ## 持久化与恢复
 
-数据目录保存 `strata.json` 和 `strata.lock`。每次成功写入将全部状态写到同目录临时文件，执行文件 fsync 后原子替换快照，并对目录执行 fsync。剖面、版本事件和对比结果始终处于同一状态边界；失败的校验不会修改内存或磁盘。
+数据目录保存 `strata.json` 和 `strata.lock`。每次成功写入将全部状态写到同目录临时文件，执行文件 fsync 后原子替换快照，并对目录执行 fsync。研究区、剖面归属、版本事件和对比结果始终处于同一状态边界；失败的校验不会修改内存或磁盘。
+
+快照为 schema 2：在原有数据之外保存研究区配额（`areas`）和剖面到研究区的归属（`memberships`）。首次启动遇到 schema 1 快照时自动迁移——所有已有剖面归入默认研究区、剖面与对比 JSON 原样保留——校验通过后立即把 schema 2 状态原子写回，迁移只发生一次。
 
 快照包含 SHA-256 校验值。启动时检查校验值、版本连续性、状态转换及对比可重复性，遇到损坏拒绝启动。进程在替换前中断保留旧快照，替换后中断使用新快照。同目录遗留的 `.strata-*` 临时文件不会参与恢复，可在服务停止时清理。若替换后同步目录失败，服务保留新内存状态并停止后续写入，健康状态变为 503；检查磁盘并重启后再读取版本确认结果，不要盲目重放修改。
 

@@ -47,7 +47,7 @@ func pagination(values url.Values) (offset, limit int, err error) {
 }
 
 func filter(raw string) (geology.Filter, error) {
-	q, err := query(raw, "q", "site", "state", "rock", "offset", "limit")
+	q, err := query(raw, "q", "site", "state", "rock", "area", "offset", "limit")
 	if err != nil {
 		return geology.Filter{}, err
 	}
@@ -55,6 +55,6 @@ func filter(raw string) (geology.Filter, error) {
 	if err != nil {
 		return geology.Filter{}, err
 	}
-	f := geology.Filter{Query: q.Get("q"), Site: q.Get("site"), State: geology.State(q.Get("state")), Rock: geology.Lithology(q.Get("rock")), Offset: offset, Limit: limit}
+	f := geology.Filter{Query: q.Get("q"), Site: q.Get("site"), State: geology.State(q.Get("state")), Rock: geology.Lithology(q.Get("rock")), Area: q.Get("area"), Offset: offset, Limit: limit}
 	return f, f.Validate()
 }

@@ -35,11 +35,19 @@ func Open(dir string) (*Repository, error) {
 		return nil, fmt.Errorf("data directory is already in use: %w", err)
 	}
 	path := filepath.Join(absolute, "strata.json")
-	state, err := readSnapshot(path)
+	state, migrated, err := readSnapshot(path)
 	if err != nil {
 		syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 		lock.Close()
 		return nil, err
+	}
+	if migrated {
+		// 迁移结果立即落盘，重启后直接按 schema 2 读取；配额统计不再依赖内存。
+		if _, err = writeSnapshot(path, state); err != nil {
+			syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+			lock.Close()
+			return nil, fmt.Errorf("persist migrated snapshot: %w", err)
+		}
 	}
 	return &Repository{state: state, path: path, lock: lock}, nil
 }

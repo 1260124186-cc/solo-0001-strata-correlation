@@ -13,7 +13,7 @@ func profileResponse(w http.ResponseWriter, status int, p geology.Profile) {
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
-	var input geology.Metadata
+	var input catalog.CreateProfile
 	if err := decode(w, r, &input); err != nil {
 		h.error(w, r, err)
 		return

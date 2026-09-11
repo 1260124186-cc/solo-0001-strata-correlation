@@ -10,6 +10,7 @@ type Filter struct {
 	Site   string
 	State  State
 	Rock   Lithology
+	Area   string
 	Offset int
 	Limit  int
 }
@@ -27,6 +28,9 @@ func (f Filter) Validate() error {
 	}
 	if f.Rock != "" && !ValidRock(f.Rock) {
 		return Invalid("rock", "不支持的岩性")
+	}
+	if f.Area != "" && !ValidAreaID(f.Area) {
+		return Invalid("area", "研究区编号无效")
 	}
 	if f.Offset < 0 || f.Offset > 1000000 {
 		return Invalid("offset", "偏移量必须为 0 到 1000000")

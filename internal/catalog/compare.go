@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"fmt"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/persistence"
@@ -28,8 +29,8 @@ func (s *Service) Compare(ctx context.Context, input correlation.Request) (corre
 			reused = true
 			return false, nil
 		}
-		if len(state.Comparisons) >= 10000 {
-			return false, geology.Conflict("对比结果数量达到 10000 条上限")
+		if len(state.Comparisons) >= maxComparisons {
+			return false, geology.Conflict(fmt.Sprintf("对比结果数量达到 %d 条上限", maxComparisons))
 		}
 		left, err := state.Revision(input.Left.ID, input.Left.Version)
 		if err != nil {

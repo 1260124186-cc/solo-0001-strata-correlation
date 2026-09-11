@@ -227,6 +227,23 @@ def browse(s):
     a = sealed(s, '赤石北剖面')
     b = create(s, '赤石南剖面')
     create(s, '远山剖面', '青岩岭')
+    # 研究区：默认区存在且承载既有剖面；新剖面显式归入新建研究区。
+    areas = s.call('GET', '/api/v1/areas')
+    assert areas['total'] >= 1 and areas['global']['profile_limit'] == 2000
+    default_id = next(x['id'] for x in areas['items'] if x['name'] == '默认研究区')
+    before_default = next(x for x in areas['items'] if x['id'] == default_id)
+    assert before_default['used_profiles'] == areas['global']['profiles_used']
+    area = s.call('POST', '/api/v1/areas',
+                  dict(name='冒烟研究区', max_profiles=2, max_versions=10), 201)
+    member = s.call('POST', '/api/v1/profiles',
+                    dict(name='区内剖面', site='点', depth_mm=10, area_id=area['id']), 201)
+    status = s.call('GET', f"/api/v1/areas/{area['id']}")
+    assert status['used_profiles'] == 1 and status['used_versions'] == 1 and member['id'] in status['profile_ids']
+    page = s.call('GET', f"/api/v1/profiles?area={area['id']}")
+    assert page['total'] == 1 and page['items'][0]['id'] == member['id']
+    s.call('GET', '/api/v1/profiles?area=area_bad', expected=422)
+    s.call('POST', '/api/v1/profiles',
+           dict(name='错区', site='点', depth_mm=10, area_id='area_' + '0' * 32), expected=422)
     q = urllib.parse.urlencode(dict(q='赤石', site='赤石岭', state='draft', limit=1))
     page = s.call('GET', '/api/v1/profiles?'+q)
     assert page['total'] == 1 and page['items'][0]['id'] == b['id']
@@ -241,6 +258,11 @@ def browse(s):
     assert s.call('GET', f'/api/v1/comparisons?profile_id={a["id"]}')['items'] == []
     diff = s.call('GET', f'/api/v1/profiles/{a["id"]}/diff?from=1&to=3')
     assert len(diff['layers']) == 2
+    # 重启后研究区与配额统计保持准确。
+    s.stop()
+    s.start()
+    status = s.call('GET', f"/api/v1/areas/{area['id']}")
+    assert status['used_profiles'] == 1 and status['used_versions'] == 1
 
 
 def main():
