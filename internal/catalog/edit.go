@@ -21,6 +21,9 @@ type ReplaceLayers struct {
 type StateChange struct {
 	ExpectedVersion int    `json:"expected_version"`
 	Reason          string `json:"reason"`
+	// Rules 为可选的一次性锁定门槛覆盖。省略时使用服务启动配置中的默认规则集合。
+	// 一旦锁定成功，使用的规则集合与结论随版本冻结。
+	Rules *geology.RuleSet `json:"rules,omitempty"`
 }
 
 func (s *Service) Edit(ctx context.Context, id string, input EditMetadata) (geology.Profile, error) {
@@ -93,13 +96,25 @@ func (s *Service) Change(ctx context.Context, id string, target geology.State, i
 	if err != nil {
 		return geology.Profile{}, err
 	}
+	if target != geology.Sealed && input.Rules != nil {
+		return geology.Profile{}, geology.Invalid("rules", "只有锁定请求才能指定完整性规则集合")
+	}
+	// 在进入事务前确定本次门槛并规范化；规则配置本身错误返回 422，
+	// 规则命中分层问题在状态机内部以 409 返回。
+	rules := s.defaultRules
+	if input.Rules != nil {
+		rules, err = geology.NormalizeRuleSet(*input.Rules)
+		if err != nil {
+			return geology.Profile{}, err
+		}
+	}
 	var result geology.Profile
 	err = s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
 		p, err := state.Latest(id)
 		if err != nil {
 			return false, err
 		}
-		revision, err := geology.ChangeState(p, target, input.ExpectedVersion, reason, nextTime(p.UpdatedAt))
+		revision, err := geology.ChangeState(p, target, input.ExpectedVersion, reason, rules, nextTime(p.UpdatedAt))
 		if err != nil {
 			return false, err
 		}

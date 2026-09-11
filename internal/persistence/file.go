@@ -45,6 +45,10 @@ func readSnapshot(path string) (State, error) {
 	if err = json.Unmarshal(env.Data, &state); err != nil {
 		return State{}, err
 	}
+	// 旧快照先做无损结构迁移，再按当前规则完整校验；迁移不改变历史解释。
+	if err = state.migrate(); err != nil {
+		return State{}, fmt.Errorf("snapshot migration: %w", err)
+	}
 	if err = state.Validate(); err != nil {
 		return State{}, fmt.Errorf("snapshot validation: %w", err)
 	}

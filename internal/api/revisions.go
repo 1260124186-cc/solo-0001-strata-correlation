@@ -16,6 +16,10 @@ func (h *Handler) change(w http.ResponseWriter, r *http.Request, target geology.
 		h.error(w, r, geology.Invalid("expected_version", "必须为正整数"))
 		return
 	}
+	if target == geology.Draft && input.Rules != nil {
+		h.error(w, r, geology.Invalid("rules", "只有锁定请求才能指定完整性规则集合"))
+		return
+	}
 	p, err := h.service.Change(r.Context(), r.PathValue("id"), target, input)
 	if err != nil {
 		h.error(w, r, err)
@@ -44,6 +48,25 @@ func (h *Handler) revision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respond(w, http.StatusOK, revision)
+}
+
+func (h *Handler) integrity(w http.ResponseWriter, r *http.Request) {
+	q, err := query(r.URL.RawQuery, "version")
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	version, err := integer(q.Get("version"), "version", 0, 1, 500)
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	explanation, err := h.service.Integrity(r.Context(), r.PathValue("id"), version)
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	respond(w, http.StatusOK, explanation)
 }
 
 func (h *Handler) history(w http.ResponseWriter, r *http.Request) {

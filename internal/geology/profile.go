@@ -97,9 +97,8 @@ func (p Profile) Validate() error {
 	if err := ValidateLayers(p.Layers, p.DepthMM); err != nil {
 		return err
 	}
-	if p.State == Sealed && len(CoverageOf(p).Gaps) != 0 {
-		return Invalid("layers", "锁定版本必须覆盖完整深度")
-	}
+	// 锁定门槛由冻结在锁定事件中的完整性规则集合负责，不再在剖面结构校验中
+	// 硬性要求连续覆盖（例如某服务可能仅启用相邻相接规则）。
 	return nil
 }
 

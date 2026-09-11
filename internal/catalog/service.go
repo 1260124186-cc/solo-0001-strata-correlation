@@ -10,9 +10,14 @@ import (
 	"time"
 )
 
-type Service struct{ repo *persistence.Repository }
+type Service struct {
+	repo         *persistence.Repository
+	defaultRules geology.RuleSet
+}
 
-func New(repo *persistence.Repository) *Service { return &Service{repo: repo} }
+func New(repo *persistence.Repository, defaultRules geology.RuleSet) *Service {
+	return &Service{repo: repo, defaultRules: defaultRules}
+}
 
 func newID() (string, error) {
 	bytes := make([]byte, 16)

@@ -18,6 +18,11 @@ go run ./cmd/stratad -addr 127.0.0.1:8093 -data ./data
 | `-addr` | `STRATA_ADDR` | `127.0.0.1:8093` | HTTP 监听地址 |
 | `-data` | `STRATA_DATA` | `./data` | 持久化目录 |
 | `-shutdown` | `STRATA_SHUTDOWN` | `10s` | 优雅退出期限，允许 1s–1m |
+| `-seal-rules` | `STRATA_SEAL_RULES` | `coverage` | 锁定完整性规则，逗号分隔，见下 |
+| `-min-layer-mm` | `STRATA_MIN_LAYER_MM` | 空 | 启用 `min_thickness` 时的单层最小厚度（毫米） |
+| `-marker-pair-groups` | `STRATA_MARKER_PAIR_GROUPS` | `上,下;顶,底` | 启用 `marker_paired` 时的方位组，组间 `;`、组内 `,` |
+
+规则配置非法（未知规则、空规则集、启用 `min_thickness` 却缺少厚度等）时服务拒绝启动。
 
 显式参数优先于环境变量。数据目录只能由一个服务进程打开；系统文件锁在进程退出后自动释放。默认只监听本机，适合受信任的单机部署。当前基线未包含身份验证、TLS 和跨节点复制。
 
@@ -51,6 +56,60 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 锁定成功返回版本 3。修改必须携带当前 `expected_version`；相同版本的并发请求只有一个成功，其余得到 HTTP 409。`ETag` 仅描述响应版本，写入以 JSON 中的 `expected_version` 为准。已锁定剖面需要通过 `/reopen` 重新打开，新版本不会改变历史记录。
 
+## 锁定完整性规则
+
+锁定不再只检查深度连续覆盖，而是执行一组可配置的完整性规则，命中任意一条即拒绝锁定（HTTP 409），错误体的 `findings` 逐条给出规则、原因和**问题所在的深度区间**（毫米，左闭右开）：
+
+```bash
+curl -sS "http://127.0.0.1:8093/api/v1/profiles/<id>/seal" \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version":2,"reason":"核对锁定"}'
+```
+
+```json
+{"error":{"code":"conflict","detail":"分层未通过锁定完整性规则，不能锁定","findings":[
+  {"rule":"coverage","detail":"分层未完整覆盖零深度到总深度","intervals":[{"top_mm":200,"bottom_mm":1000}]},
+  {"rule":"adjacent","detail":"相邻分层之间存在空隙，必须首尾相接","intervals":[{"top_mm":200,"bottom_mm":1000}]},
+  {"rule":"min_thickness","detail":"存在厚度小于 500 毫米的分层","intervals":[{"top_mm":0,"bottom_mm":200}]},
+  {"rule":"marker_paired","detail":"标志层未成对出现: 凝灰层","intervals":[{"top_mm":0,"bottom_mm":200}]}
+]}}
+```
+
+可用规则：
+
+| 规则代码 | 含义 | 命中区间 |
+| --- | --- | --- |
+| `coverage` | 分层完整覆盖 `[0, depth_mm)`，无缺口（默认启用，等同旧行为） | 每个缺口 |
+| `adjacent` | 按深度排序后相邻层必须首尾相接；不强制覆盖顶/底 | 层间每个空隙 |
+| `min_thickness` | 单层厚度不得低于 `min_layer_mm`（1–1000000 毫米） | 每层过薄分层 |
+| `marker_paired` | 标志层按"去掉方位后缀的层名"分组，同组每个方位后缀都必须出现相同次数；如配置 `上,下` 则 `凝灰层上` 必须有 `凝灰层下` 配对。未匹配任何方位后缀的标志层视为无法配对 | 涉及的标志层所在分层 |
+
+规则集合有两个来源，解析后都会规范化（规则去重排序、组内后缀排序）：
+
+- **服务默认门槛**：启动参数 `-seal-rules`（环境变量 `STRATA_SEAL_RULES`），配合 `-min-layer-mm` 与 `-marker-pair-groups`。省略 `rules` 的锁定请求使用它。
+- **请求级覆盖**：`POST /seal` 请求体可携带 `rules` 对象，仅对本次锁定生效：
+
+```json
+{"expected_version":6,"reason":"仅按覆盖锁定",
+ "rules":{"rules":["coverage","min_thickness"],"min_layer_mm":500}}
+```
+
+请求覆盖若启用 `marker_paired`，必须在同一对象中显式给出 `marker_groups`，例如 `"marker_groups":[["上","下"],["顶","底"]]`；规则代码未知、规则集为空、参数越界一律 422，不会锁定。
+
+### 对历史版本的解释
+
+每次成功锁定都会把**当时使用的规则集合、解释器版本与完整结论（含命中区间）冻结在该锁定版本的事件中**：
+
+```bash
+curl -sS "http://127.0.0.1:8093/api/v1/profiles/<id>/integrity?version=3"
+```
+
+- 对锁定版本返回 `"basis":"sealed"`，报告直接取自冻结记录。随后重新打开、修改分层、甚至用不同的 `-seal-rules` 重启服务，该版本的解释都逐字节不变——历史结论只属于那条版本，绝不会拿当前分层或当前配置重新冒充历史结论。
+- 对草稿/历史未锁定版本返回 `"basis":"live"`：没有冻结结论可引用，接口取**该版本自己的分层**按服务当前默认规则现场解释，并明确标注它不是历史裁定。省略 `version` 解释当前版本。
+- 冻结记录同时出现在 `GET /revisions/{version}` 的 `event.integrity` 字段中。
+
+持久化层在每次启动时对冻结记录做确定性复验：记录必须是规范化规则集合对该版本分层重新计算出的结果；篡改规则、结论、区间或分层（即使伪造快照校验和）都会拒绝启动。旧版（schema 1）快照首次打开时无损迁移：旧锁定事件按当时唯一的覆盖规则补记结论，不改变任何历史分层。
+
 ## 对比两个锁定版本
 
 ```json
@@ -83,8 +142,9 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `PUT /profiles/{id}` | `expected_version, reason, metadata` 整体替换元数据 |
 | `PUT /profiles/{id}/layers` | `expected_version, reason, layers` 整体替换分层 |
 | `GET /profiles/{id}/coverage` | 缺口、各岩性厚度和能否锁定 |
+| `GET /profiles/{id}/integrity` | 可选 `version`；返回锁定门槛解释（锁定版本读冻结结论，未锁定版本现场解释） |
 | `GET /profiles/{id}/at` | 必填 `depth_mm`，可选 `version`；返回所属层或缺口 |
-| `POST /profiles/{id}/seal` | `expected_version, reason`，锁定当前版本 |
+| `POST /profiles/{id}/seal` | `expected_version, reason`，可选 `rules` 一次性覆盖默认门槛；锁定当前版本 |
 | `POST /profiles/{id}/reopen` | `expected_version, reason`，重新打开 |
 | `GET /profiles/{id}/history` | 按版本升序列出事件，支持 `offset, limit` |
 | `GET /profiles/{id}/revisions/{version}` | 指定历史版本及事件 |
@@ -120,7 +180,7 @@ STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 
 **测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、可配置完整性规则（覆盖/相接/薄层/标志层成对）、规则命中区间与失败保状态、历史冻结解释与配置重启不变性、快照迁移与防篡改、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
 
 ## 目录
 

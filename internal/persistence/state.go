@@ -15,7 +15,7 @@ type State struct {
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{Schema: 2, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
 }
 
 func (s State) Clone() State {
@@ -52,8 +52,36 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 	return history[version-1].Clone(), nil
 }
 
+// migrate 将旧格式快照提升到当前 schema。迁移只补充结构字段、从不重新解释分层：
+// 旧版锁定事件按当时唯一的"完整覆盖"门槛补冻结结论，且仅在分层确实全覆盖时
+// 才能通过旧版校验产生，因此结论必然通过。
+func (s *State) migrate() error {
+	if s.Schema == 2 {
+		return nil
+	}
+	if s.Schema != 1 {
+		return fmt.Errorf("unsupported snapshot schema %d", s.Schema)
+	}
+	for id, history := range s.Histories {
+		for i := range history {
+			r := &history[i]
+			if r.Event.Action != "seal" || r.Event.Integrity != nil {
+				continue
+			}
+			rules := geology.DefaultRuleSet()
+			report := geology.EvaluateIntegrity(r.Profile, rules)
+			if !report.Passed {
+				return fmt.Errorf("legacy seal %s/%d fails its recorded coverage gate", id, i+1)
+			}
+			r.Event.Integrity = &report
+		}
+	}
+	s.Schema = 2
+	return nil
+}
+
 func (s State) Validate() error {
-	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
+	if s.Schema != 2 || s.Histories == nil || s.Comparisons == nil {
 		return fmt.Errorf("unsupported snapshot shape")
 	}
 	for id, history := range s.Histories {
@@ -83,6 +111,9 @@ func (s State) Validate() error {
 					return err
 				}
 			}
+			if err := validateEventIntegrity(r); err != nil {
+				return fmt.Errorf("integrity record %s/%d: %w", id, i+1, err)
+			}
 		}
 	}
 	for id, result := range s.Comparisons {
@@ -110,6 +141,44 @@ func (s State) Validate() error {
 	return nil
 }
 
+// validateEventIntegrity 复验事件携带的规则记录：
+// 只有锁定事件可以携带记录；记录必须是规范化规则集合对该版本分层的确定性结果。
+// 任何篡改（改规则、改结论、改区间）都会让快照无法启动。
+func validateEventIntegrity(r geology.Revision) error {
+	if r.Event.Action != "seal" {
+		if r.Event.Integrity != nil {
+			return fmt.Errorf("integrity record on non-seal event")
+		}
+		return nil
+	}
+	if r.Profile.State != geology.Sealed {
+		return fmt.Errorf("seal event without sealed profile")
+	}
+	stored := r.Event.Integrity
+	if stored == nil {
+		return fmt.Errorf("seal event without integrity record")
+	}
+	rules := geology.RuleSet{Rules: stored.Rules, MinLayerMM: stored.MinLayerMM, MarkerGroups: stored.MarkerGroups}
+	normalized, err := geology.NormalizeRuleSet(rules)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(normalized, rules) {
+		return fmt.Errorf("stored rule set is not normalized")
+	}
+	if stored.EvaluatorVersion != geology.EvaluatorVersion {
+		return fmt.Errorf("evaluator version mismatch")
+	}
+	expected := geology.EvaluateIntegrity(r.Profile, normalized)
+	if !reflect.DeepEqual(expected, *stored) {
+		return fmt.Errorf("integrity conclusion does not match the recorded strata")
+	}
+	if !stored.Passed {
+		return fmt.Errorf("sealed profile failed its recorded rules")
+	}
+	return nil
+}
+
 func validateStep(before geology.Profile, r geology.Revision) error {
 	after := r.Profile
 	switch r.Event.Action {
@@ -123,10 +192,16 @@ func validateStep(before geology.Profile, r geology.Revision) error {
 		if r.Event.Action == "metadata" && !reflect.DeepEqual(before.Layers, after.Layers) {
 			return fmt.Errorf("metadata edit changed layers")
 		}
+		if r.Event.Integrity != nil {
+			return fmt.Errorf("integrity record on edit event")
+		}
 	case "seal", "reopen":
 		expected := geology.Sealed
 		if r.Event.Action == "reopen" {
 			expected = geology.Draft
+			if r.Event.Integrity != nil {
+				return fmt.Errorf("integrity record on reopen event")
+			}
 		}
 		if after.State != expected || before.State == expected || before.Metadata != after.Metadata || !reflect.DeepEqual(before.Layers, after.Layers) {
 			return fmt.Errorf("invalid state change")

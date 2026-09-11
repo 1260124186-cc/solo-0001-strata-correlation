@@ -3,9 +3,10 @@ package geology
 import "fmt"
 
 type Problem struct {
-	Code   string `json:"code"`
-	Field  string `json:"field,omitempty"`
-	Detail string `json:"detail"`
+	Code     string    `json:"code"`
+	Field    string    `json:"field,omitempty"`
+	Detail   string    `json:"detail"`
+	Findings []Finding `json:"findings,omitempty"`
 }
 
 func (p *Problem) Error() string {
@@ -25,6 +26,12 @@ func Missing(detail string) error {
 
 func Conflict(detail string) error {
 	return &Problem{Code: "conflict", Detail: detail}
+}
+
+// LockConflict 表示分层未通过锁定门槛，findings 给出命中的规则及问题深度区间。
+func LockConflict(findings []Finding) error {
+	copied := append([]Finding{}, findings...)
+	return &Problem{Code: "conflict", Detail: "分层未通过锁定完整性规则，不能锁定", Findings: copied}
 }
 
 func VersionConflict(want, actual int) error {

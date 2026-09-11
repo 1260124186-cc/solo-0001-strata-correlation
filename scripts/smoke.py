@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class Server:
-    def __init__(self, directory):
+    def __init__(self, directory, extra_args=None, env=None):
         self.directory = Path(directory)
         self.binary = self.directory / 'stratad'
         args = ['go', 'build']
@@ -27,6 +27,8 @@ class Server:
             args.append('-race')
         subprocess.run(args + ['-o', str(self.binary), './cmd/stratad'], cwd=ROOT, check=True, timeout=60)
         self.process = None
+        self.extra_args = extra_args or []
+        self.env = env
         self.log = open(self.directory / 'server.log', 'w+')
         try:
             self.start()
@@ -38,9 +40,15 @@ class Server:
             raise
 
     def start(self):
+        command = [str(self.binary), '-addr', '127.0.0.1:0', '-data', str(self.directory / 'data')]
+        command += self.extra_args
+        environment = None
+        if self.env is not None:
+            environment = dict(os.environ)
+            environment.update(self.env)
         self.process = subprocess.Popen(
-            [str(self.binary), '-addr', '127.0.0.1:0', '-data', str(self.directory / 'data')],
-            stdout=subprocess.PIPE, stderr=self.log, text=True,
+            command,
+            stdout=subprocess.PIPE, stderr=self.log, text=True, env=environment,
         )
         with selectors.DefaultSelector() as selector:
             selector.register(self.process.stdout, selectors.EVENT_READ)
@@ -199,6 +207,115 @@ def seal(s):
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == current
 
 
+def integrity(s):
+    rules = ['coverage', 'adjacent', 'min_thickness', 'marker_paired']
+    p = create(s, '完整性剖面')
+    bad = [
+        dict(top_mm=0, bottom_mm=200, rock='sandstone', marker='凝灰层上'),
+        dict(top_mm=1000, bottom_mm=4000, rock='mudstone', marker='煤层顶'),
+        dict(top_mm=4000, bottom_mm=10000, rock='shale'),
+    ]
+    p = replace(s, p, bad)
+    body = dict(expected_version=p['version'], reason='尝试锁定')
+    problem = s.call('POST', f'/api/v1/profiles/{p["id"]}/seal', body, 409)['error']
+    assert problem['code'] == 'conflict'
+    by_rule = {}
+    for f in problem['findings']:
+        by_rule.setdefault(f['rule'], []).append(f)
+    assert set(by_rule) == set(rules), by_rule
+    assert by_rule['coverage'][0]['intervals'] == [dict(top_mm=200, bottom_mm=1000)]
+    assert by_rule['adjacent'][0]['intervals'] == [dict(top_mm=200, bottom_mm=1000)]
+    assert by_rule['min_thickness'][0]['intervals'] == [dict(top_mm=0, bottom_mm=200)]
+    marker_findings = [f for f in problem['findings'] if f['rule'] == 'marker_paired']
+    assert [f['intervals'] for f in marker_findings] == [
+        [dict(top_mm=0, bottom_mm=200)], [dict(top_mm=1000, bottom_mm=4000)],
+    ]
+    # 锁定失败不改变版本和状态。
+    current = s.call('GET', f'/api/v1/profiles/{p["id"]}')
+    assert current['version'] == p['version'] and current['state'] == 'draft'
+    # 锁定前用默认门槛对草稿现场解释。
+    live = s.call('GET', f'/api/v1/profiles/{p["id"]}/integrity')
+    assert live['basis'] == 'live' and not live['report']['passed']
+    assert set(live['rules']) == set(rules) and live['report']['min_layer_mm'] == 500
+
+    good = [
+        dict(top_mm=0, bottom_mm=2000, rock='sandstone', marker='凝灰层上'),
+        dict(top_mm=2000, bottom_mm=5000, rock='mudstone', marker='凝灰层下'),
+        dict(top_mm=5000, bottom_mm=10000, rock='shale'),
+    ]
+    p = replace(s, p, good)
+    p = s.call('POST', f'/api/v1/profiles/{p["id"]}/seal',
+               dict(expected_version=p['version'], reason='四规则锁定'), 200)
+    sealed_version = p['version']
+    frozen_before = s.call('GET', f'/api/v1/profiles/{p["id"]}/integrity?version={sealed_version}')
+    assert frozen_before['basis'] == 'sealed' and frozen_before['report']['passed']
+    assert frozen_before['report']['evaluator_version'] == 1
+    revision = s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/{sealed_version}')
+    assert revision['event']['integrity'] == frozen_before['report']
+
+    # 请求级覆盖：只按覆盖规则锁定含有薄夹层的版本。
+    p = state(s, p, 'reopen')
+    thin = [
+        dict(top_mm=0, bottom_mm=100, rock='sandstone', marker='凝灰层上'),
+        dict(top_mm=100, bottom_mm=2000, rock='limestone'),
+        dict(top_mm=2000, bottom_mm=5000, rock='mudstone', marker='凝灰层下'),
+        dict(top_mm=5000, bottom_mm=10000, rock='shale'),
+    ]
+    p = replace(s, p, thin)
+    # 缺失方位组、未知规则、空规则集合、越界厚度都是 422，且状态不变。
+    bad_bodies = [
+        dict(rules=dict(rules=['marker_paired'])),
+        dict(rules=dict(rules=['bogus'])),
+        dict(rules=dict(rules=[])),
+        dict(rules=dict(rules=['coverage'], min_layer_mm=0)),
+        dict(rules=dict(rules=['marker_paired'], marker_groups=[['上', '上']])),
+        dict(rules=dict(rules=['marker_paired'], marker_groups=[['上', '下'], ['下', '底']])),
+    ]
+    for extra_fields in bad_bodies:
+        body = dict(expected_version=p['version'], reason='非法门槛')
+        body.update(extra_fields)
+        s.call('POST', f'/api/v1/profiles/{p["id"]}/seal', body, 422)
+    unchanged = s.call('GET', f'/api/v1/profiles/{p["id"]}')
+    assert unchanged['version'] == p['version'] and unchanged['state'] == 'draft'
+    body = dict(expected_version=p['version'], reason='仅覆盖锁定',
+                rules=dict(rules=['coverage']))
+    p = s.call('POST', f'/api/v1/profiles/{p["id"]}/seal', body, 200)
+    coverage_seal = s.call('GET', f'/api/v1/profiles/{p["id"]}/integrity?version={p["version"]}')
+    assert coverage_seal['rules'] == ['coverage'] and coverage_seal['report']['passed']
+
+    # 重新打开并改成"覆盖完整但有薄夹层"的分层后，旧锁定版本的冻结结论逐字节不变。
+    p = state(s, p, 'reopen')
+    p = replace(s, p, [dict(top_mm=0, bottom_mm=50, rock='sandstone'),
+                       dict(top_mm=50, bottom_mm=10000, rock='mudstone')])
+    frozen_after = s.call('GET', f'/api/v1/profiles/{p["id"]}/integrity?version={sealed_version}')
+    assert frozen_after == frozen_before
+    # 当前草稿按默认四规则现场解释失败，且与历史版本明确区分。
+    live_now = s.call('GET', f'/api/v1/profiles/{p["id"]}/integrity')
+    assert live_now['basis'] == 'live' and not live_now['report']['passed']
+
+    # 重启后服务必须接受自己写出的数据，且历史解释仍然冻结。
+    s.stop()
+    s.start()
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}/integrity?version={sealed_version}') == frozen_before
+
+    # 换成只含覆盖规则的配置重启：历史结论仍随版本走，不被新配置改写。
+    s.stop()
+    s.extra_args = ['-seal-rules', 'coverage']
+    s.start()
+    refrozen = s.call('GET', f'/api/v1/profiles/{p["id"]}/integrity?version={sealed_version}')
+    assert refrozen == frozen_before
+    assert set(refrozen['rules']) == set(rules)
+    live_coverage = s.call('GET', f'/api/v1/profiles/{p["id"]}/integrity')
+    assert live_coverage['basis'] == 'live' and live_coverage['rules'] == ['coverage']
+    assert live_coverage['report']['passed']
+    # 重新打开请求携带规则集合会被拒绝，规则只能在锁定时给出。
+    s.call('POST', f'/api/v1/profiles/{p["id"]}/seal',
+           dict(expected_version=p['version'], reason='再锁定'), 200)
+    s.call('POST', f'/api/v1/profiles/{p["id"]}/reopen',
+           dict(expected_version=p['version'] + 1, reason='重开',
+                rules=dict(rules=['coverage'])), 422)
+
+
 def compare(s):
     a, b = sealed(s, '西侧剖面'), sealed(s, '东侧剖面', 6000)
     request = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
@@ -245,12 +362,15 @@ def browse(s):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'integrity', 'compare', 'browse', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'integrity', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
-            server = Server(directory)
+            extra = None
+            if name == 'integrity':
+                extra = ['-seal-rules', 'coverage,adjacent,min_thickness,marker_paired', '-min-layer-mm', '500']
+            server = Server(directory, extra_args=extra)
             try:
                 globals()[name](server)
             finally:
