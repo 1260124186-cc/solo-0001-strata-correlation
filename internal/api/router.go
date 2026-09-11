@@ -28,6 +28,7 @@ func New(service *catalog.Service, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("POST /api/v1/comparison-offsets", h.suggest)
 	mux.HandleFunc("POST /api/v1/profiles/{id}/seal", h.seal)
 	mux.HandleFunc("POST /api/v1/profiles/{id}/reopen", h.reopen)
+	mux.HandleFunc("POST /api/v1/profiles/{id}/adopt", h.adopt)
 	mux.HandleFunc("GET /api/v1/profiles/{id}/history", h.history)
 	mux.HandleFunc("GET /api/v1/profiles/{id}/revisions/{version}", h.revision)
 	mux.HandleFunc("POST /api/v1/comparisons", h.compare)

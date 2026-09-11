@@ -223,6 +223,65 @@ def compare(s):
     assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
 
 
+def adopt(s):
+    p = create(s, '采用历史剖面')
+    p = replace(s, p, layers())
+    p = state(s, p, 'seal')
+    locked_v3 = s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/3')
+    p = state(s, p, 'reopen')
+    body = dict(expected_version=p['version'], metadata=dict(name='错误名称', site=p['site'], depth_mm=p['depth_mm']), reason='走偏的修订')
+    p = s.call('PUT', f'/api/v1/profiles/{p["id"]}', body)
+    assert p['version'] == 5 and p['name'] == '错误名称'
+    # 已锁定时不能采用；重新打开后才能采用锁定版本（v3）的内容
+    p = s.call('POST', f'/api/v1/profiles/{p["id"]}/seal', dict(expected_version=5, reason='再次锁定'))
+    assert p['version'] == 6 and p['state'] == 'sealed'
+    s.call('POST', f'/api/v1/profiles/{p["id"]}/adopt',
+           dict(expected_version=6, source_version=3, reason='采用旧分层'), 409)
+    p = state(s, p, 'reopen')
+    assert p['version'] == 7
+    s.call('POST', f'/api/v1/profiles/{p["id"]}/adopt',
+           dict(expected_version=7, source_version=9, reason='采用不存在版本'), 404)
+    s.call('POST', f'/api/v1/profiles/{p["id"]}/adopt',
+           dict(expected_version=7, source_version=7, reason='采用当前版本'), 409)
+    s.call('POST', f'/api/v1/profiles/{p["id"]}/adopt',
+           dict(expected_version=6, source_version=3, reason='预期版本过期'), 409)
+    p = s.call('POST', f'/api/v1/profiles/{p["id"]}/adopt',
+               dict(expected_version=7, source_version=3, reason='采用已核对的锁定版本'))
+    assert p['version'] == 8 and p['state'] == 'draft'
+    assert p['name'] == '采用历史剖面' and p['layers'] == locked_v3['profile']['layers']
+    history = s.call('GET', f'/api/v1/profiles/{p["id"]}/history')
+    event = history['items'][-1]
+    assert event['action'] == 'adopt' and event['source_version'] == 3 and event['version'] == 8
+    # 覆盖统计与按点查询反映真实采用内容
+    coverage = s.call('GET', f'/api/v1/profiles/{p["id"]}/coverage')['coverage']
+    assert coverage['ready'] and coverage['gaps'] == []
+    point = s.call('GET', f'/api/v1/profiles/{p["id"]}/at?depth_mm=4000&version=8')
+    assert point['layer']['rock'] == 'mudstone'
+    # 新草拟版本可独立继续编录并锁定；历史锁定版本保持不变
+    p = replace(s, p, [dict(top_mm=0, bottom_mm=10000, rock='limestone')])
+    assert p['version'] == 9 and s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/3') == locked_v3
+    p = state(s, p, 'seal')
+    assert p['version'] == 10 and p['state'] == 'sealed'
+    # 也可以采用存在缺口的历史草拟版本
+    g = create(s, '旧草稿剖面')
+    g = replace(s, g, [dict(top_mm=1000, bottom_mm=9000, rock='shale')])
+    draft_v2 = s.call('GET', f'/api/v1/profiles/{g["id"]}/revisions/2')
+    g = replace(s, g, list(reversed(layers())))
+    g = s.call('POST', f'/api/v1/profiles/{g["id"]}/adopt',
+               dict(expected_version=g['version'], source_version=2, reason='恢复带缺口草稿'))
+    assert g['version'] == 4 and g['layers'] == draft_v2['profile']['layers']
+    assert s.call('GET', f'/api/v1/profiles/{g["id"]}/coverage')['coverage']['ready'] is False
+    s.call('POST', f'/api/v1/profiles/{g["id"]}/seal',
+           dict(expected_version=4, reason='缺口不能锁定'), 409)
+    s.stop()
+    s.start()
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == p
+    assert s.call('GET', f'/api/v1/profiles/{g["id"]}') == g
+    adopted = s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/8')
+    assert adopted['event']['action'] == 'adopt' and adopted['event']['source_version'] == 3
+    assert adopted['profile']['layers'] == locked_v3['profile']['layers']
+
+
 def browse(s):
     a = sealed(s, '赤石北剖面')
     b = create(s, '赤石南剖面')
@@ -245,9 +304,9 @@ def browse(s):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'adopt', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'adopt'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

@@ -79,7 +79,7 @@ func (s State) Validate() error {
 				if !before.CreatedAt.Equal(r.Profile.CreatedAt) || r.Profile.UpdatedAt.Before(before.UpdatedAt) {
 					return fmt.Errorf("invalid revision chronology")
 				}
-				if err := validateStep(before, r); err != nil {
+				if err := validateStep(history, i, r); err != nil {
 					return err
 				}
 			}
@@ -110,12 +110,16 @@ func (s State) Validate() error {
 	return nil
 }
 
-func validateStep(before geology.Profile, r geology.Revision) error {
+func validateStep(history []geology.Revision, index int, r geology.Revision) error {
+	before := history[index-1].Profile
 	after := r.Profile
 	switch r.Event.Action {
 	case "metadata", "layers":
 		if before.State != geology.Draft || after.State != geology.Draft {
 			return fmt.Errorf("edited sealed revision")
+		}
+		if r.Event.SourceVersion != 0 {
+			return fmt.Errorf("source version on non-adopt action")
 		}
 		if r.Event.Action == "layers" && before.Metadata != after.Metadata {
 			return fmt.Errorf("layers edit changed metadata")
@@ -128,8 +132,23 @@ func validateStep(before geology.Profile, r geology.Revision) error {
 		if r.Event.Action == "reopen" {
 			expected = geology.Draft
 		}
+		if r.Event.SourceVersion != 0 {
+			return fmt.Errorf("source version on non-adopt action")
+		}
 		if after.State != expected || before.State == expected || before.Metadata != after.Metadata || !reflect.DeepEqual(before.Layers, after.Layers) {
 			return fmt.Errorf("invalid state change")
+		}
+	case "adopt":
+		if before.State != geology.Draft || after.State != geology.Draft {
+			return fmt.Errorf("adopted outside draft state")
+		}
+		sourceVersion := r.Event.SourceVersion
+		if sourceVersion < 1 || sourceVersion >= after.Version {
+			return fmt.Errorf("invalid adopt source version")
+		}
+		source := history[sourceVersion-1].Profile
+		if source.ID != after.ID || source.Metadata != after.Metadata || !reflect.DeepEqual(source.Layers, after.Layers) {
+			return fmt.Errorf("adopt content does not match source revision")
 		}
 	default:
 		return fmt.Errorf("unknown revision action")

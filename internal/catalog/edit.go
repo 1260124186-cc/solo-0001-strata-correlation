@@ -23,6 +23,12 @@ type StateChange struct {
 	Reason          string `json:"reason"`
 }
 
+type AdoptHistory struct {
+	ExpectedVersion int    `json:"expected_version"`
+	SourceVersion   int    `json:"source_version"`
+	Reason          string `json:"reason"`
+}
+
 func (s *Service) Edit(ctx context.Context, id string, input EditMetadata) (geology.Profile, error) {
 	metadata, err := geology.NormalizeMetadata(input.Metadata)
 	if err != nil {
@@ -100,6 +106,37 @@ func (s *Service) Change(ctx context.Context, id string, target geology.State, i
 			return false, err
 		}
 		revision, err := geology.ChangeState(p, target, input.ExpectedVersion, reason, nextTime(p.UpdatedAt))
+		if err != nil {
+			return false, err
+		}
+		if err = appendRevision(state, revision); err != nil {
+			return false, err
+		}
+		result = revision.Profile
+		return true, nil
+	})
+	return result, err
+}
+
+func (s *Service) Adopt(ctx context.Context, id string, input AdoptHistory) (geology.Profile, error) {
+	if input.SourceVersion < 1 {
+		return geology.Profile{}, geology.Invalid("source_version", "必须为正整数")
+	}
+	reason, err := normalizedReason(input.Reason)
+	if err != nil {
+		return geology.Profile{}, err
+	}
+	var result geology.Profile
+	err = s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
+		p, err := state.Latest(id)
+		if err != nil {
+			return false, err
+		}
+		source, err := state.Revision(id, input.SourceVersion)
+		if err != nil {
+			return false, err
+		}
+		revision, err := geology.Adopt(p, source, input.ExpectedVersion, reason, nextTime(p.UpdatedAt))
 		if err != nil {
 			return false, err
 		}
