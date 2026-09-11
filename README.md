@@ -54,7 +54,7 @@ curl -sS -X POST "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/layers/merg
 
 `POST /layers/split` 用 `top_mm` 指定要拆开的分层（其顶部深度），`at_mm` 给出严格位于该层内部的拆分深度；两半保留原岩性和描述。该层没有标志层时不需要也不能提供 `marker_side`；带标志层时必须用 `marker_side: "upper" | "lower"` 明确标志层落在哪一边。
 
-`POST /layers/merge` 合并在 `boundary_mm` 处严格相邻（顶底相接、中间无缺口）的两层；跨缺口修订仍需使用整体替换。相邻两层的岩性或描述不一致时，必须分别用 `rock`、`description` 明确保留 `upper` 还是 `lower`；两侧一致时无需提供，提供反而会被拒绝。标志层只有在两层都带标志层（名称必然不同）时才需要用 `marker` 选择；仅一侧有标志层时自动保留。每次局部修订生成一个新版本，事件动作为 `split` 或 `merge`；校验失败不改变任何层，已锁定剖面一律返回 409。
+`POST /layers/merge` 合并在 `boundary_mm` 处严格相邻（顶底相接、中间无缺口）的两层；跨缺口修订仍需使用整体替换。相邻两层的岩性、描述或标志层不一致时，必须分别用 `rock`、`description`、`marker` 明确保留 `upper` 还是 `lower`；某字段两侧一致时无需提供，提供反而会被拒绝。标志层不一致包括一侧有标志层、另一侧为空的情况，因此只有一层带标志层时也必须显式选择；选择空标志层所在的一侧即丢弃该标志层。每次局部修订生成一个新版本，事件动作为 `split` 或 `merge`；校验失败不改变任何层，已锁定剖面一律返回 409。
 
 ```bash
 curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/coverage"

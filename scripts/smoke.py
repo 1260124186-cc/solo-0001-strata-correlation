@@ -259,9 +259,17 @@ def refine(s):
     assert point['layer']['bottom_mm'] == 4000 and point['layer']['marker'] == '凝灰'
     coverage = s.call('GET', f'/api/v1/profiles/{p["id"]}/coverage')['coverage']
     assert coverage['covered_mm'] == 10000 and coverage['gaps'] == []
-    # 相同岩性与描述、仅一侧有标志层时直接合回
-    p = s.call('POST', merge, dict(expected_version=p['version'], boundary_mm=2500, reason='合回原层'))
-    assert [(l['top_mm'], l['bottom_mm']) for l in p['layers']] == [(0, 4000), (4000, 10000)]
+    # 仅一侧有标志层也属于不一致：不选择被拒绝，选择标志层所在侧合回原层
+    s.call('POST', merge, dict(expected_version=p['version'], boundary_mm=2500, reason='未选择标志层侧'), 422)
+    p = s.call('POST', merge, dict(expected_version=p['version'], boundary_mm=2500, marker='lower', reason='合回原层'))
+    assert [(l['top_mm'], l['bottom_mm'], l['marker']) for l in p['layers']] == \
+        [(0, 4000, '凝灰'), (4000, 10000, '')]
+    # 仅上层带标志层时，允许选择下层（空标志层）得到不带标志层的合并结果
+    p = replace(s, p, [dict(top_mm=0, bottom_mm=5000, rock='sandstone', marker='独标'),
+                       dict(top_mm=5000, bottom_mm=10000, rock='sandstone')])
+    s.call('POST', merge, dict(expected_version=p['version'], boundary_mm=5000, reason='未选择标志层侧'), 422)
+    p = s.call('POST', merge, dict(expected_version=p['version'], boundary_mm=5000, marker='lower', reason='选择空侧丢弃标志层'))
+    assert p['layers'] == [dict(top_mm=0, bottom_mm=10000, rock='sandstone', description='', marker='')]
     p = replace(s, p, [dict(top_mm=0, bottom_mm=4000, rock='sandstone', description='上砂', marker='上标志'),
                        dict(top_mm=4000, bottom_mm=10000, rock='mudstone', description='下泥', marker='下标志')])
     s.call('POST', merge, dict(expected_version=p['version'], boundary_mm=4000, reason='未选择保留侧'), 422)
@@ -270,7 +278,7 @@ def refine(s):
                                    rock='lower', description='upper', marker='lower', reason='合并并逐字段选择'))
     assert p['layers'] == [dict(top_mm=0, bottom_mm=10000, rock='mudstone', description='上砂', marker='下标志')]
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}/at?depth_mm=0')['layer']['description'] == '上砂'
-    diff = s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=5&to=6')
+    diff = s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=7&to=8')
     assert len(diff['layers']) == 3 and diff['fields'] == []
     history = s.call('GET', f'/api/v1/profiles/{p["id"]}/history?limit=20')
     assert history['items'][-1]['action'] == 'merge'

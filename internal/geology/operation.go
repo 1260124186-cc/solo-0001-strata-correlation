@@ -75,7 +75,8 @@ type MergeChoice struct {
 }
 
 // MergeLayers 合并在 boundary 深度处严格相邻（顶底相接、中间无缺口）的两层。
-// 岩性、描述不一致时必须选择保留哪一侧；标志层仅在两层都带标志层时才需要选择。
+// 岩性、描述或标志层在两侧不一致时（标志层不一致包括一侧有、另一侧为空），
+// 都必须选择保留哪一侧；选择空标志层的一侧即丢弃标志层。
 // 结果与整体替换走同一套规范化与校验。
 func MergeLayers(in []Layer, depthMM, boundaryMM int64, choice MergeChoice) ([]Layer, error) {
 	for _, item := range []struct {
@@ -105,8 +106,10 @@ func MergeLayers(in []Layer, depthMM, boundaryMM int64, choice MergeChoice) ([]L
 	if err := chooseSide("description", up.Description == low.Description, choice.Description); err != nil {
 		return nil, err
 	}
-	// 同一剖面的标志层名称忽略大小写唯一，因此两层都有标志层时必然不一致。
-	markerConflict := up.Marker != "" && low.Marker != ""
+	// 同一剖面标志层名称忽略大小写唯一，两层都带标志层时名称必然不同；
+	// 一侧有标志层、另一侧为空同样属于不一致，调用方必须明确选择，
+	// 选择空的一侧即丢弃标志层。
+	markerConflict := up.Marker != low.Marker
 	if err := chooseSide("marker", !markerConflict, choice.Marker); err != nil {
 		return nil, err
 	}
@@ -119,15 +122,10 @@ func MergeLayers(in []Layer, depthMM, boundaryMM int64, choice MergeChoice) ([]L
 	if choice.Description == Lower {
 		merged.Description = low.Description
 	}
-	switch {
-	case markerConflict && choice.Marker == Lower:
+	if markerConflict && choice.Marker == Lower {
 		merged.Marker = low.Marker
-	case markerConflict:
+	} else {
 		merged.Marker = up.Marker
-	case up.Marker != "":
-		merged.Marker = up.Marker
-	default:
-		merged.Marker = low.Marker
 	}
 	out := append([]Layer{}, in[:index]...)
 	out = append(out, merged)
