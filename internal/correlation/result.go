@@ -15,10 +15,18 @@ type Reference struct {
 	Version int    `json:"version"`
 }
 
+// Window is an optional depth interval expressed in the left profile's
+// coordinates. A nil window means the whole profiles are compared.
+type Window struct {
+	TopMM    int64 `json:"top_mm"`
+	BottomMM int64 `json:"bottom_mm"`
+}
+
 type Request struct {
 	Left     Reference `json:"left"`
 	Right    Reference `json:"right"`
 	OffsetMM int64     `json:"offset_mm"`
+	Window   *Window   `json:"window,omitempty"`
 }
 
 type Segment struct {
@@ -40,6 +48,7 @@ type Result struct {
 	ID         string       `json:"id"`
 	Algorithm  string       `json:"algorithm"`
 	Request    Request      `json:"request"`
+	Window     *Window      `json:"window,omitempty"`
 	Segments   []Segment    `json:"segments"`
 	Markers    []MarkerPair `json:"markers"`
 	OverlapMM  int64        `json:"overlap_mm"`
@@ -62,6 +71,17 @@ func (r Request) Validate() error {
 	if r.OffsetMM < -geology.MaxDepth || r.OffsetMM > geology.MaxDepth {
 		return geology.Invalid("offset_mm", "偏移超出一千米范围")
 	}
+	if w := r.Window; w != nil {
+		if w.TopMM < 0 || w.BottomMM < 0 {
+			return geology.Invalid("window", "深度窗口不能为负数")
+		}
+		if w.TopMM >= w.BottomMM {
+			return geology.Invalid("window", "深度窗口必须满足 top_mm 小于 bottom_mm")
+		}
+		if w.BottomMM > geology.MaxDepth {
+			return geology.Invalid("window", "深度窗口超出一千米范围")
+		}
+	}
 	return nil
 }
 
@@ -80,6 +100,11 @@ func (r Result) Clone() Result {
 	if r.Similarity != nil {
 		n := *r.Similarity
 		r.Similarity = &n
+	}
+	if r.Window != nil {
+		w := *r.Window
+		r.Window = &w
+		r.Request.Window = &w
 	}
 	return r
 }

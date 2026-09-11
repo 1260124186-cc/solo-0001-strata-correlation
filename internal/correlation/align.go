@@ -1,6 +1,7 @@
 package correlation
 
 import (
+	"fmt"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"strings"
 	"time"
@@ -22,12 +23,26 @@ func Align(left, right geology.Profile, request Request, now time.Time) (Result,
 	if request.Left != (Reference{left.ID, left.Version}) || request.Right != (Reference{right.ID, right.Version}) {
 		return Result{}, geology.Invalid("reference", "历史版本与输入不一致")
 	}
-	result := Result{ID: request.Key(), Algorithm: Algorithm, Request: request, Segments: []Segment{}, Markers: []MarkerPair{}, CreatedAt: now}
+	// The window is interpreted in the left profile's coordinates and must lie
+	// inside the left profile's [0, depth_mm) extent.
+	var window *Window
+	if request.Window != nil {
+		if request.Window.BottomMM > left.DepthMM {
+			return Result{}, geology.Invalid("window", "深度窗口超出左侧剖面总深度")
+		}
+		w := *request.Window
+		window = &w
+	}
+	result := Result{ID: request.Key(), Algorithm: Algorithm, Request: request, Window: window, Segments: []Segment{}, Markers: []MarkerPair{}, CreatedAt: now}
 	i, j := 0, 0
 	for i < len(left.Layers) && j < len(right.Layers) {
 		a, b := left.Layers[i], right.Layers[j]
 		top := max(a.TopMM, b.TopMM+request.OffsetMM)
 		bottom := min(a.BottomMM, b.BottomMM+request.OffsetMM)
+		if window != nil {
+			top = max(top, window.TopMM)
+			bottom = min(bottom, window.BottomMM)
+		}
 		if top < bottom {
 			relation := "different"
 			thickness := bottom - top
@@ -44,6 +59,9 @@ func Align(left, right geology.Profile, request Request, now time.Time) (Result,
 			result.Segments = append(result.Segments, Segment{top, bottom, a.Rock, b.Rock, relation})
 		}
 		leftEnd, rightEnd := a.BottomMM, b.BottomMM+request.OffsetMM
+		if window != nil {
+			rightEnd = min(rightEnd, window.BottomMM)
+		}
 		if leftEnd <= rightEnd {
 			i++
 		}
@@ -52,6 +70,10 @@ func Align(left, right geology.Profile, request Request, now time.Time) (Result,
 		}
 	}
 	if result.OverlapMM == 0 {
+		if window != nil {
+			return Result{}, geology.Conflict(fmt.Sprintf(
+				"指定偏移后，左侧深度窗口 %d–%d 毫米内没有共同深度区间", window.TopMM, window.BottomMM))
+		}
 		return Result{}, geology.Conflict("指定偏移后没有共同深度区间")
 	}
 	if result.KnownMM > 0 {
@@ -66,6 +88,9 @@ func Align(left, right geology.Profile, request Request, now time.Time) (Result,
 	}
 	for _, layer := range left.Layers {
 		if layer.Marker == "" {
+			continue
+		}
+		if window != nil && (layer.TopMM < window.TopMM || layer.TopMM >= window.BottomMM) {
 			continue
 		}
 		other, exists := markers[strings.ToLower(layer.Marker)]

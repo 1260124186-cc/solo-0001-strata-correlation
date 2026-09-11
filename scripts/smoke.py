@@ -199,20 +199,67 @@ def seal(s):
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == current
 
 
+def conflict_detail(s, body):
+    try:
+        payload = s.call('POST', '/api/v1/comparisons', body, expected=409)
+    except RuntimeError as error:
+        raise AssertionError(str(error))
+    return payload['error']['detail']
+
+
 def compare(s):
     a, b = sealed(s, '西侧剖面'), sealed(s, '东侧剖面', 6000)
     request = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
     result = s.call('POST', '/api/v1/comparisons', request, 201)
     assert result['overlap_mm'] == 10000 and result['equal_mm'] == 8000 and result['similarity'] == .8
+    assert 'window' not in result and result['request'].get('window') is None
     assert s.call('POST', '/api/v1/comparisons', request) == result
     rows = list(csv.DictReader(io.StringIO(s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv', raw=True))))
     assert len(rows) == 3 and sum(int(r['thickness_mm']) for r in rows) == 10000
+    assert {r['window_top_mm'] for r in rows} == {''} and {r['window_bottom_mm'] for r in rows} == {''}
     proposal = s.call('POST', '/api/v1/comparison-offsets', dict(left=request['left'], right=request['right']))
     assert proposal['comparison']['offset_mm'] == -2000 and not proposal['ambiguous']
     aligned = s.call('POST', '/api/v1/comparisons', proposal['comparison'], 201)
     assert aligned['similarity'] == 1 and aligned['overlap_mm'] == 8000
     s.call('POST', '/api/v1/comparisons', {**request, 'offset_mm': 10000}, 409)
     s.call('POST', '/api/v1/comparisons', {**request, 'left': dict(id=a['id'], version=2)}, 409)
+    # Optional depth window in left coordinates; the offset right side only
+    # contributes where it reaches the window's common interval.
+    windowed_body = dict(request, window=dict(top_mm=2000, bottom_mm=8000))
+    windowed = s.call('POST', '/api/v1/comparisons', windowed_body, 201)
+    assert windowed['id'] != result['id']
+    assert windowed['window'] == dict(top_mm=2000, bottom_mm=8000)
+    assert windowed['request']['window'] == dict(top_mm=2000, bottom_mm=8000)
+    assert windowed['overlap_mm'] == 6000 and windowed['equal_mm'] == 4000
+    assert abs(windowed['similarity'] - 4000 / 6000) < 1e-9
+    first, last = windowed['segments'][0], windowed['segments'][-1]
+    assert first['top_mm'] == 2000 and last['bottom_mm'] == 8000
+    assert s.call('POST', '/api/v1/comparisons', windowed_body, 200) == windowed
+    win_rows = list(csv.DictReader(io.StringIO(s.call('GET', f'/api/v1/comparisons/{windowed["id"]}/csv', raw=True))))
+    assert sum(int(r['thickness_mm']) for r in win_rows) == 6000
+    assert {r['window_top_mm'] for r in win_rows} == {'2000'}
+    assert {r['window_bottom_mm'] for r in win_rows} == {'8000'}
+    # The full-profile result keeps its original identity next to the windowed one.
+    assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+    # A window holding the left marker reports that evidence, while a window
+    # below it reports none.
+    assert [m['name'] for m in windowed['markers']] == ['凝灰标志']
+    above = s.call('POST', '/api/v1/comparisons',
+                   dict(request, window=dict(top_mm=5000, bottom_mm=8000)), 201)
+    assert above['markers'] == []
+    # Offset in left coordinates: shifted right side ends at 8000, so the
+    # window [8000,10000) has no reachable common interval.
+    shifted = dict(request, offset_mm=-2000, window=dict(top_mm=8000, bottom_mm=10000))
+    detail = conflict_detail(s, shifted)
+    assert '8000' in detail and '窗口' in detail
+    # The same window without the offset is fully common and comparable.
+    inside = s.call('POST', '/api/v1/comparisons',
+                    dict(request, window=dict(top_mm=0, bottom_mm=2000)), 201)
+    assert inside['overlap_mm'] == 2000 and inside['similarity'] == 1.0
+    # Window shape and bounds are field errors, not conflicts.
+    for bad_window in [dict(top_mm=8000, bottom_mm=2000), dict(top_mm=-1, bottom_mm=2000),
+                       dict(top_mm=0, bottom_mm=10001), dict(top_mm=0, bottom_mm=0)]:
+        s.call('POST', '/api/v1/comparisons', dict(request, window=bad_window), 422)
     c = state(s, replace(s, create(s, '待识别岩性'), [dict(top_mm=0, bottom_mm=10000, rock='unknown')]), 'seal')
     unknown = s.call('POST', '/api/v1/comparisons', {**request, 'right': dict(id=c['id'], version=3)}, 201)
     assert unknown['known_mm'] == 0 and unknown['similarity'] is None
@@ -221,6 +268,7 @@ def compare(s):
     s.stop()
     s.start()
     assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+    assert s.call('GET', f'/api/v1/comparisons/{windowed["id"]}') == windowed
 
 
 def browse(s):

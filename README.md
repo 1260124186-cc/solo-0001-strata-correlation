@@ -57,15 +57,18 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 {
   "left": {"id": "<left-profile-id>", "version": 3},
   "right": {"id": "<right-profile-id>", "version": 3},
-  "offset_mm": -2000
+  "offset_mm": -2000,
+  "window": {"top_mm": 2000, "bottom_mm": 8000}
 }
 ```
 
 将以上对象以 JSON 提交至 `POST /api/v1/comparisons`。右侧深度转换为 `右侧原深度 + offset_mm`，左侧作为共同坐标。算法合并两侧分层边界，并保留每个共同区间的岩性、厚度与 `equal / different / unknown` 关系。
 
-`similarity = equal_mm / known_mm`。未知岩性不计入 `known_mm`；全部共同区间未知时 `similarity` 为 `null`。无共同区间、非锁定输入或同一版本自身对比会被拒绝。两份不同版本可以属于同一剖面。对比结果引用**指定历史版本**，当前剖面重新打开后仍可重用旧结果。
+`window` 为可选字段，坐标按**左侧剖面**给出；省略时进行整段对比。提供窗口时，只有落在 `[window.top_mm, window.bottom_mm)` 内的共同区间计入结果——偏移后的右侧资料仅参与该窗口内的共同区间，窗口外的厚度不计入 `overlap_mm / known_mm / equal_mm`，窗口外的共同标志层也不列入证据。窗口必须满足 `0 ≤ top_mm < bottom_mm`，且 `bottom_mm` 不超过左侧剖面总深度。窗口对比与整段对比是不同输入：带窗口的结果带顶层 `window` 字段，编号也不同。
 
-相同输入和算法版本生成同一编号，首次返回 HTTP 201，重复请求返回 HTTP 200 和原结果。交换左右或修改偏移属于不同输入。`GET /api/v1/comparisons/{id}/csv` 导出固定字段的区间 CSV，字段只包含数值、岩性代码和关系代码。
+`similarity = equal_mm / known_mm`。未知岩性不计入 `known_mm`；窗口或整段的全部共同区间未知时 `similarity` 为 `null`。无共同区间、窗口内没有任何有效共同区间、非锁定输入或同一版本自身对比会被拒绝，其中窗口无共同区间返回 409 并在错误信息中给出窗口边界。两份不同版本可以属于同一剖面。对比结果引用**指定历史版本**，当前剖面重新打开后仍可重用旧结果。
+
+相同输入和算法版本生成同一编号，首次返回 HTTP 201，重复请求返回 HTTP 200 和原结果。交换左右、修改偏移或增删深度窗口都属于不同输入。`window` 是后期加入的可选字段：旧库中整段对比结果仍使用原编号，重新提交相同的整段输入仍命中旧结果，不会被窗口功能挤掉或失效。`GET /api/v1/comparisons/{id}/csv` 导出固定字段的区间 CSV，字段只包含数值、岩性代码和关系代码；CSV 每行重复携带 `window_top_mm / window_bottom_mm` 两列，整段对比时这两列为空。
 
 `POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
@@ -90,7 +93,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /profiles/{id}/revisions/{version}` | 指定历史版本及事件 |
 | `GET /profiles/{id}/diff` | 必填 `from, to`，查看同一剖面从旧版本到新版本的差异 |
 | `POST /comparison-offsets` | 根据共同标志层建议偏移 |
-| `POST /comparisons` | `left, right, offset_mm`，生成或复用对比 |
+| `POST /comparisons` | `left, right, offset_mm`，可选 `window`（左侧坐标），生成或复用对比 |
 | `GET /comparisons` | 可选 `profile_id, offset, limit` |
 | `GET /comparisons/{id}` | 已保存的完整对比结果 |
 | `GET /comparisons/{id}/csv` | 区间 CSV |
@@ -120,7 +123,7 @@ STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 
 **测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、深度窗口对比、未知岩性、偏移建议、CSV、列表筛选与分页。
 
 ## 目录
 
