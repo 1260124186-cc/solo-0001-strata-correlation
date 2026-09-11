@@ -10,11 +10,55 @@ import (
 	"path/filepath"
 )
 
-const maxSnapshot = 64 << 20
+// MaxSnapshotBytes bounds the finished on-disk snapshot file, checksum
+// envelope included. Writes are gated on the same byte figure reported by
+// SnapshotSize.
+const MaxSnapshotBytes = 64 << 20
 
 type envelope struct {
 	Digest string          `json:"digest"`
 	Data   json.RawMessage `json:"data"`
+}
+
+// SnapshotTooLargeError means the finished snapshot file (checksum envelope
+// included) would exceed MaxSnapshotBytes. It is reported before any file in
+// the data directory is created or replaced.
+type SnapshotTooLargeError struct {
+	Bytes int
+	Limit int
+}
+
+func (e *SnapshotTooLargeError) Error() string {
+	return fmt.Sprintf("snapshot capacity of %d bytes reached, snapshot requires %d bytes", e.Limit, e.Bytes)
+}
+
+// marshalSnapshot renders state in the exact byte shape stored on disk. data is
+// the state payload by itself; contents is the checksum envelope that actually
+// lands in the file and is always larger than data. Every size decision must be
+// based on contents, never on data.
+func marshalSnapshot(state State) (data, contents []byte, err error) {
+	data, err = json.Marshal(state)
+	if err != nil {
+		return nil, nil, err
+	}
+	sum := sha256.Sum256(data)
+	contents, err = json.Marshal(envelope{Digest: hex.EncodeToString(sum[:]), Data: data})
+	if err != nil {
+		return nil, nil, err
+	}
+	return data, contents, nil
+}
+
+// SnapshotSize reports snapshot sizes from the real file caliber: fileBytes
+// counts the checksum envelope that commit gating uses, dataBytes counts only
+// the marshaled state payload. Diagnostics and write gating share this function
+// so they can never disagree.
+func SnapshotSize(state State) (dataBytes, fileBytes int, err error) {
+	data, contents, err := marshalSnapshot(state)
+	if err != nil {
+		return 0, 0, err
+	}
+	return len(data), len(contents), nil
 }
 
 func readSnapshot(path string) (State, error) {
@@ -26,11 +70,11 @@ func readSnapshot(path string) (State, error) {
 		return State{}, err
 	}
 	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, maxSnapshot+1))
+	raw, err := io.ReadAll(io.LimitReader(f, MaxSnapshotBytes+1))
 	if err != nil {
 		return State{}, err
 	}
-	if len(raw) > maxSnapshot {
+	if len(raw) > MaxSnapshotBytes {
 		return State{}, fmt.Errorf("snapshot exceeds 64 MiB")
 	}
 	var env envelope
@@ -54,17 +98,15 @@ func readSnapshot(path string) (State, error) {
 // A rename is the commit point. After it, callers must use the new state even
 // when syncing the directory reports an error.
 func writeSnapshot(path string, state State) (committed bool, err error) {
-	raw, err := json.Marshal(state)
+	_, contents, err := marshalSnapshot(state)
 	if err != nil {
 		return false, err
 	}
-	sum := sha256.Sum256(raw)
-	contents, err := json.Marshal(envelope{hex.EncodeToString(sum[:]), raw})
-	if err != nil {
-		return false, err
-	}
-	if len(contents) > maxSnapshot {
-		return false, fmt.Errorf("snapshot capacity of 64 MiB reached")
+	// Measure the finished file and reject before touching the data directory,
+	// so an over-limit write creates no temporary file and leaves the previous
+	// snapshot and in-memory state untouched.
+	if len(contents) > MaxSnapshotBytes {
+		return false, &SnapshotTooLargeError{Bytes: len(contents), Limit: MaxSnapshotBytes}
 	}
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".strata-*")

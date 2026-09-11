@@ -33,7 +33,7 @@ func (s *Service) Edit(ctx context.Context, id string, input EditMetadata) (geol
 		return geology.Profile{}, err
 	}
 	var result geology.Profile
-	err = s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
+	err = s.update(ctx, func(state *persistence.State) (bool, error) {
 		p, err := state.Latest(id)
 		if err != nil {
 			return false, err
@@ -63,7 +63,7 @@ func (s *Service) Replace(ctx context.Context, id string, input ReplaceLayers) (
 		return geology.Profile{}, err
 	}
 	var result geology.Profile
-	err = s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
+	err = s.update(ctx, func(state *persistence.State) (bool, error) {
 		p, err := state.Latest(id)
 		if err != nil {
 			return false, err
@@ -94,7 +94,7 @@ func (s *Service) Change(ctx context.Context, id string, target geology.State, i
 		return geology.Profile{}, err
 	}
 	var result geology.Profile
-	err = s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
+	err = s.update(ctx, func(state *persistence.State) (bool, error) {
 		p, err := state.Latest(id)
 		if err != nil {
 			return false, err

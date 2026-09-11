@@ -16,6 +16,7 @@ func New(service *catalog.Service, logger *slog.Logger) http.Handler {
 	h := &Handler{service: service, logger: logger}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.health)
+	mux.HandleFunc("GET /api/v1/diagnostics", h.diagnostics)
 	mux.HandleFunc("GET /api/v1/rocks", h.rocks)
 	mux.HandleFunc("POST /api/v1/profiles", h.create)
 	mux.HandleFunc("GET /api/v1/profiles", h.list)

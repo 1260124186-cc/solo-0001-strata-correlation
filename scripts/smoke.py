@@ -120,7 +120,34 @@ def sealed(s, name, boundary=4000):
     return state(s, replace(s, create(s, name), layers(boundary)), 'seal')
 
 
+def capacity(s, profiles=None, revisions=None, comparisons=None):
+    report = s.call('GET', '/api/v1/diagnostics')
+    counts = report['capacity']
+    assert counts['profiles_limit'] == 2000
+    assert counts['revisions_limit'] == 500
+    assert counts['comparisons_limit'] == 10000
+    if profiles is not None:
+        assert counts['profiles_used'] == profiles, counts
+    if revisions is not None:
+        assert counts['revisions_used'] == revisions, counts
+    if comparisons is not None:
+        assert counts['comparisons_used'] == comparisons, counts
+    snapshot = report['snapshot']
+    assert snapshot['limit_bytes'] == 64 << 20
+    snapshot_path = s.directory / 'data' / 'strata.json'
+    # Diagnostics must use the real on-disk file caliber: checksum envelope
+    # included, byte-for-byte identical to strata.json once a write landed.
+    if snapshot_path.exists():
+        actual_size = snapshot_path.stat().st_size
+        assert snapshot['file_bytes'] == actual_size, (snapshot['file_bytes'], actual_size)
+        assert snapshot['data_bytes'] < snapshot['file_bytes']
+    assert snapshot['free_bytes'] == snapshot['limit_bytes'] - snapshot['file_bytes']
+    assert snapshot['full'] is False
+    return report
+
+
 def record(s):
+    capacity(s, profiles=0, revisions=0, comparisons=0)
     p = create(s)
     assert p['version'] == 1 and p['layers'] == []
     s.call('POST', '/api/v1/profiles', dict(name='空', site='地点', depth_mm=0), 422)
@@ -162,10 +189,12 @@ def record(s):
     snapshot.write_bytes(original)
     s.start()
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == p
+    capacity(s, profiles=1, revisions=3)
 
 
 def seal(s):
     p = sealed(s, '锁定剖面')
+    capacity(s, profiles=1, revisions=3, comparisons=0)
     replace(s, p, layers(), 409)
     locked = s.call('GET', f'/api/v1/profiles/{p["id"]}/revisions/3')
     p = state(s, p, 'reopen')
@@ -197,6 +226,7 @@ def seal(s):
     s.stop()
     s.start()
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == current
+    capacity(s, profiles=1, revisions=5, comparisons=0)
 
 
 def compare(s):
@@ -221,6 +251,7 @@ def compare(s):
     s.stop()
     s.start()
     assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+    capacity(s, profiles=3, revisions=4, comparisons=3)
 
 
 def browse(s):
@@ -241,6 +272,7 @@ def browse(s):
     assert s.call('GET', f'/api/v1/comparisons?profile_id={a["id"]}')['items'] == []
     diff = s.call('GET', f'/api/v1/profiles/{a["id"]}/diff?from=1&to=3')
     assert len(diff['layers']) == 2
+    capacity(s, profiles=3, revisions=3, comparisons=0)
 
 
 def main():

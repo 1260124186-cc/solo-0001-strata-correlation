@@ -4,10 +4,19 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/persistence"
 	"strings"
 	"time"
+)
+
+// Capacity limits are the single source shared by write gating and the
+// diagnostics endpoint, so the two can never report different ceilings.
+const (
+	maxProfiles    = 2000
+	maxRevisions   = 500
+	maxComparisons = 10000
 )
 
 type Service struct{ repo *persistence.Repository }
@@ -30,6 +39,18 @@ func nextTime(previous time.Time) time.Time {
 	return now
 }
 
+// update runs a mutating workflow and translates a refused commit into a
+// problem. A snapshot over the size limit is a capacity rejection, not an
+// internal failure: the state mutation was never committed.
+func (s *Service) update(ctx context.Context, fn func(*persistence.State) (bool, error)) error {
+	err := s.repo.Update(ctx, fn)
+	var tooLarge *persistence.SnapshotTooLargeError
+	if errors.As(err, &tooLarge) {
+		return geology.TooLarge("总快照体积（含校验和包装）达到 64 MiB 上限，写入已拒绝")
+	}
+	return err
+}
+
 func (s *Service) Create(ctx context.Context, metadata geology.Metadata) (geology.Profile, error) {
 	normalized, err := geology.NormalizeMetadata(metadata)
 	if err != nil {
@@ -41,8 +62,8 @@ func (s *Service) Create(ctx context.Context, metadata geology.Metadata) (geolog
 	}
 	now := time.Now().UTC()
 	p := geology.Profile{ID: id, Metadata: normalized, Layers: []geology.Layer{}, State: geology.Draft, Version: 1, CreatedAt: now, UpdatedAt: now}
-	err = s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
-		if len(state.Histories) >= 2000 {
+	err = s.update(ctx, func(state *persistence.State) (bool, error) {
+		if len(state.Histories) >= maxProfiles {
 			return false, geology.Conflict("最多保存 2000 个剖面")
 		}
 		if _, exists := state.Histories[id]; exists {
@@ -87,7 +108,7 @@ func normalizedReason(reason string) (string, error) {
 
 func appendRevision(state *persistence.State, revision geology.Revision) error {
 	history := state.Histories[revision.Profile.ID]
-	if len(history) >= 500 {
+	if len(history) >= maxRevisions {
 		return geology.Conflict("单个剖面最多保留 500 个版本")
 	}
 	if revision.Profile.Version != len(history)+1 {

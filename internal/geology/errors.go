@@ -27,6 +27,10 @@ func Conflict(detail string) error {
 	return &Problem{Code: "conflict", Detail: detail}
 }
 
+func TooLarge(detail string) error {
+	return &Problem{Code: "too_large", Detail: detail}
+}
+
 func VersionConflict(want, actual int) error {
 	return Conflict(fmt.Sprintf("预期版本 %d，当前版本 %d", want, actual))
 }

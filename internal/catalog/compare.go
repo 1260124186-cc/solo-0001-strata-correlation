@@ -22,13 +22,13 @@ func (s *Service) Compare(ctx context.Context, input correlation.Request) (corre
 	}
 	var result correlation.Result
 	reused := false
-	err := s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
+	err := s.update(ctx, func(state *persistence.State) (bool, error) {
 		if cached, ok := state.Comparisons[input.Key()]; ok {
 			result = cached.Clone()
 			reused = true
 			return false, nil
 		}
-		if len(state.Comparisons) >= 10000 {
+		if len(state.Comparisons) >= maxComparisons {
 			return false, geology.Conflict("对比结果数量达到 10000 条上限")
 		}
 		left, err := state.Revision(input.Left.ID, input.Left.Version)
