@@ -96,6 +96,9 @@ func Align(left, right geology.Profile, request Request, now time.Time) (Result,
 		other, exists := markers[strings.ToLower(layer.Marker)]
 		if exists {
 			rightTop := other.TopMM + request.OffsetMM
+			if window != nil && (rightTop < window.TopMM || rightTop >= window.BottomMM) {
+				continue
+			}
 			result.Markers = append(result.Markers, MarkerPair{layer.Marker, layer.TopMM, rightTop, rightTop - layer.TopMM})
 		}
 	}

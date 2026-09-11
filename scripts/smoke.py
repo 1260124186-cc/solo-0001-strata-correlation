@@ -260,6 +260,31 @@ def compare(s):
     for bad_window in [dict(top_mm=8000, bottom_mm=2000), dict(top_mm=-1, bottom_mm=2000),
                        dict(top_mm=0, bottom_mm=10001), dict(top_mm=0, bottom_mm=0)]:
         s.call('POST', '/api/v1/comparisons', dict(request, window=bad_window), 422)
+    # Marker evidence needs BOTH sides inside the actual window. The left
+    # marker sits at 2000, the matching right marker at 6000.
+    marker_left = [dict(top_mm=0, bottom_mm=2000, rock='sandstone'),
+                   dict(top_mm=2000, bottom_mm=5000, rock='mudstone', marker='凝灰标志'),
+                   dict(top_mm=5000, bottom_mm=10000, rock='limestone', marker='对照标志')]
+    marker_right = [dict(top_mm=0, bottom_mm=6000, rock='sandstone'),
+                    dict(top_mm=6000, bottom_mm=8000, rock='mudstone', marker='凝灰标志'),
+                    dict(top_mm=8000, bottom_mm=10000, rock='shale')]
+    ml = state(s, replace(s, create(s, '标志层左列'), marker_left), 'seal')
+    mr = state(s, replace(s, create(s, '标志层右列'), marker_right), 'seal')
+    marker_request = dict(left=dict(id=ml['id'], version=3), right=dict(id=mr['id'], version=3), offset_mm=0)
+    full_markers = s.call('POST', '/api/v1/comparisons', marker_request, 201)
+    assert [m['name'] for m in full_markers['markers']] == ['凝灰标志']
+    # Window [0,5000) contains the left marker (2000) but the right marker
+    # (6000) falls outside: the pair must not appear in the windowed result.
+    win_markers = s.call('POST', '/api/v1/comparisons',
+                         dict(marker_request, window=dict(top_mm=0, bottom_mm=5000)), 201)
+    assert win_markers['markers'] == [], win_markers['markers']
+    # With offset -2000 the right marker shifts to 4000, inside the window, so
+    # the pair is reported using its shifted position.
+    shifted_markers = s.call('POST', '/api/v1/comparisons',
+                             dict(marker_request, offset_mm=-2000, window=dict(top_mm=0, bottom_mm=5000)), 201)
+    assert len(shifted_markers['markers']) == 1
+    pair = shifted_markers['markers'][0]
+    assert pair['name'] == '凝灰标志' and pair['left_mm'] == 2000 and pair['right_mm'] == 4000
     c = state(s, replace(s, create(s, '待识别岩性'), [dict(top_mm=0, bottom_mm=10000, rock='unknown')]), 'seal')
     unknown = s.call('POST', '/api/v1/comparisons', {**request, 'right': dict(id=c['id'], version=3)}, 201)
     assert unknown['known_mm'] == 0 and unknown['similarity'] is None
