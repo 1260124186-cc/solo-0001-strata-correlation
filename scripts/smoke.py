@@ -3,6 +3,7 @@
 import argparse
 import concurrent.futures
 import csv
+import hashlib
 import io
 import json
 import os
@@ -82,10 +83,15 @@ class Server:
             if 'DATA RACE' in content:
                 raise RuntimeError('race detector found a race')
 
-    def call(self, method, path, body=None, expected=200, raw=False):
-        data = None if body is None else json.dumps(body, ensure_ascii=False).encode()
+    def call(self, method, path, body=None, expected=200, raw=False, content_type='application/json'):
+        if body is None:
+            data = None
+        elif isinstance(body, str):
+            data = body.encode()
+        else:
+            data = json.dumps(body, ensure_ascii=False).encode()
         request = urllib.request.Request(self.url + path, data=data, method=method,
-                                         headers={'Content-Type': 'application/json'})
+                                         headers={'Content-Type': content_type})
         try:
             response = urllib.request.urlopen(request, timeout=10)
         except urllib.error.HTTPError as error:
@@ -205,22 +211,45 @@ def compare(s):
     result = s.call('POST', '/api/v1/comparisons', request, 201)
     assert result['overlap_mm'] == 10000 and result['equal_mm'] == 8000 and result['similarity'] == .8
     assert s.call('POST', '/api/v1/comparisons', request) == result
-    rows = list(csv.DictReader(io.StringIO(s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv', raw=True))))
+    text = s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv', raw=True)
+    rows = list(csv.DictReader(io.StringIO(text)))
     assert len(rows) == 3 and sum(int(r['thickness_mm']) for r in rows) == 10000
+    manifest = s.call('GET', f'/api/v1/comparisons/{result["id"]}/manifest')
+    assert manifest['result_id'] == result['id'] and manifest['algorithm'] == 'interval-v1'
+    assert manifest['columns'] == ['top_mm', 'bottom_mm', 'thickness_mm', 'left_rock', 'right_rock', 'relation']
+    assert manifest['rows'] == 3 and manifest['csv_sha256'] == hashlib.sha256(text.encode()).hexdigest()
+    checked = s.call('POST', f'/api/v1/comparisons/{result["id"]}/csv/verify', text, content_type='text/csv')
+    assert checked['valid'] and checked['manifest'] == manifest
+    lines = text.splitlines()
+    order = [lines[0].split(',').index(name) for name in
+             ['relation', 'right_rock', 'left_rock', 'thickness_mm', 'bottom_mm', 'top_mm']]
+    shuffled = '\n'.join(','.join(line.split(',')[i] for i in order) for line in lines) + '\n'
+    verify = f'/api/v1/comparisons/{result["id"]}/csv/verify'
+    s.call('POST', verify, shuffled, 409, content_type='text/csv')
+    s.call('POST', verify, text + '\n', 409, content_type='text/csv')
+    s.call('POST', verify, text.replace(',', ' ,', 1), 409, content_type='text/csv')
+    s.call('POST', verify, text, 415)
+    s.call('POST', '/api/v1/comparisons/cmp_' + '0' * 32 + '/csv/verify', text, 404, content_type='text/csv')
+    s.call('GET', '/api/v1/comparisons/cmp_' + '0' * 32 + '/manifest', expected=404)
     proposal = s.call('POST', '/api/v1/comparison-offsets', dict(left=request['left'], right=request['right']))
     assert proposal['comparison']['offset_mm'] == -2000 and not proposal['ambiguous']
     aligned = s.call('POST', '/api/v1/comparisons', proposal['comparison'], 201)
     assert aligned['similarity'] == 1 and aligned['overlap_mm'] == 8000
+    s.call('POST', f'/api/v1/comparisons/{aligned["id"]}/csv/verify', text, 409, content_type='text/csv')
     s.call('POST', '/api/v1/comparisons', {**request, 'offset_mm': 10000}, 409)
     s.call('POST', '/api/v1/comparisons', {**request, 'left': dict(id=a['id'], version=2)}, 409)
     c = state(s, replace(s, create(s, '待识别岩性'), [dict(top_mm=0, bottom_mm=10000, rock='unknown')]), 'seal')
     unknown = s.call('POST', '/api/v1/comparisons', {**request, 'right': dict(id=c['id'], version=3)}, 201)
     assert unknown['known_mm'] == 0 and unknown['similarity'] is None
-    state(s, a, 'reopen')
+    a = state(s, a, 'reopen')
     assert s.call('POST', '/api/v1/comparisons', request) == result
+    replace(s, a, layers(2000))
+    assert s.call('GET', f'/api/v1/comparisons/{result["id"]}/manifest') == manifest
     s.stop()
     s.start()
     assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+    assert s.call('GET', f'/api/v1/comparisons/{result["id"]}/manifest') == manifest
+    assert s.call('POST', verify, text, content_type='text/csv')['valid']
 
 
 def browse(s):

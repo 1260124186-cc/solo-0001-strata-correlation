@@ -59,7 +59,7 @@ func fail(w http.ResponseWriter, r *http.Request, err error, logger *slog.Logger
 		switch problem.Code {
 		case "missing":
 			status = http.StatusNotFound
-		case "conflict":
+		case "conflict", "mismatch":
 			status = http.StatusConflict
 		case "media_type":
 			status = http.StatusUnsupportedMediaType

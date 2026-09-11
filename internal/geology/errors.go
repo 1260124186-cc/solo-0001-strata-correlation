@@ -27,6 +27,10 @@ func Conflict(detail string) error {
 	return &Problem{Code: "conflict", Detail: detail}
 }
 
+func Mismatch(detail string) error {
+	return &Problem{Code: "mismatch", Detail: detail}
+}
+
 func VersionConflict(want, actual int) error {
 	return Conflict(fmt.Sprintf("预期版本 %d，当前版本 %d", want, actual))
 }

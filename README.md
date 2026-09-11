@@ -67,11 +67,13 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 相同输入和算法版本生成同一编号，首次返回 HTTP 201，重复请求返回 HTTP 200 和原结果。交换左右或修改偏移属于不同输入。`GET /api/v1/comparisons/{id}/csv` 导出固定字段的区间 CSV，字段只包含数值、岩性代码和关系代码。
 
+`GET /api/v1/comparisons/{id}/manifest` 返回导出清单：结果编号、算法版本、列名、行数，以及对实际导出 CSV 字节计算的 SHA-256 摘要 `csv_sha256`。清单由已保存的不可变结果推导，不读取剖面当前状态，因此剖面重新打开或服务重启后清单保持不变。复核者将已导出的 CSV 以 `text/csv` 请求体提交至 `POST /api/v1/comparisons/{id}/csv/verify` 即可只读校验：内容一致返回 200 与清单；仅改变列顺序或空白也会导致摘要不匹配，返回 409；结果不存在返回 404。校验不修改任何数据。
+
 `POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
 ## HTTP 接口
 
-接口统一前缀 `/api/v1`，请求体类型 `application/json`，最大 4 MiB；拒绝未知 JSON 字段及多个连续 JSON 对象。应用错误采用 `{"error":{"code":"invalid","field":"depth_mm","detail":"..."}}`。HTTP 422 表示字段错误，409 表示状态或版本冲突，404 表示资源缺失，415 表示请求类型错误，413 表示体积超限，500 表示内部故障。不存在的路由和不支持的方法使用 Go HTTP 的 404/405 响应。
+接口统一前缀 `/api/v1`，请求体类型 `application/json`，最大 4 MiB；拒绝未知 JSON 字段及多个连续 JSON 对象。应用错误采用 `{"error":{"code":"invalid","field":"depth_mm","detail":"..."}}`。HTTP 422 表示字段错误，409 表示状态、版本冲突或导出内容摘要不匹配，404 表示资源缺失，415 表示请求类型错误，413 表示体积超限，500 表示内部故障。不存在的路由和不支持的方法使用 Go HTTP 的 404/405 响应。
 
 | 方法与路径 | 输入或行为 |
 | --- | --- |
@@ -94,6 +96,8 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /comparisons` | 可选 `profile_id, offset, limit` |
 | `GET /comparisons/{id}` | 已保存的完整对比结果 |
 | `GET /comparisons/{id}/csv` | 区间 CSV |
+| `GET /comparisons/{id}/manifest` | 结果编号、算法版本与 CSV 内容摘要 |
+| `POST /comparisons/{id}/csv/verify` | 只读校验已导出 CSV，正文为 `text/csv` |
 
 上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
 
@@ -120,7 +124,7 @@ STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 
 **测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV 与导出清单校验、列表筛选与分页。
 
 ## 目录
 
@@ -129,7 +133,7 @@ cmd/stratad/          启动、信号和 HTTP 服务生命周期
 internal/api/        JSON、路由、查询参数和请求记录
 internal/catalog/    编录、修订、查阅和对比工作流
 internal/geology/    分层规则、覆盖、深度查询和版本差异
-internal/correlation/区间对比、标志层偏移与 CSV
+internal/correlation/区间对比、标志层偏移、CSV 与导出清单
 internal/persistence/快照校验、原子替换、独占锁
 internal/config/     环境变量与启动参数
 scripts/smoke.py      临时环境 HTTP 运行验证
