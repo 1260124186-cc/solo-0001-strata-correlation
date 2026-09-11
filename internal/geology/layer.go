@@ -58,6 +58,23 @@ func NormalizeLayers(in []Layer, depth int64) ([]Layer, error) {
 	return layers, ValidateLayers(layers, depth)
 }
 
+// LayersEqual 判断两段“已规范化”的分层是否描述同一套岩层。
+// 调用方必须先用 NormalizeLayers 处理两侧：文字已 trim、顺序已按
+// (top_mm, bottom_mm) 排定，因此这里按位置逐字段比较即可，输入数组
+// 顺序本身不构成业务差异。深度、岩性、描述或标志层名称的任何不同
+// （包括标志层大小写）都视为业务变化。
+func LayersEqual(a, b []Layer) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func ValidateLayers(layers []Layer, depth int64) error {
 	if len(layers) > MaxLayers {
 		return Invalid("layers", "最多允许 500 层")

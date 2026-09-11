@@ -41,6 +41,13 @@ func (s *Service) Edit(ctx context.Context, id string, input EditMetadata) (geol
 		if err = geology.CheckEditable(p, input.ExpectedVersion); err != nil {
 			return false, err
 		}
+		// 规范化后与当前元数据完全一致（仅输入空白差异）时没有业务变化，
+		// 返回当前剖面：不写事件、不增加版本、不重写快照。
+		// 放在 CheckEditable 之后，过期版本和锁定剖面仍按原规则拒绝。
+		if p.Metadata == metadata {
+			result = p
+			return false, nil
+		}
 		p.Metadata = metadata
 		p.Version++
 		p.UpdatedAt = nextTime(p.UpdatedAt)
@@ -74,6 +81,13 @@ func (s *Service) Replace(ctx context.Context, id string, input ReplaceLayers) (
 		layers, err := geology.NormalizeLayers(input.Layers, p.DepthMM)
 		if err != nil {
 			return false, err
+		}
+		// 规范化（trim 文字、按深度排序）后与当前分层一致，仅输入顺序或
+		// 首尾空白不同，属于同一套岩层：不记修订。仍排在可编辑性和分层
+		// 校验之后，冲突与无效输入不会因此被放过。
+		if geology.LayersEqual(p.Layers, layers) {
+			result = p
+			return false, nil
 		}
 		p.Layers = layers
 		p.Version++

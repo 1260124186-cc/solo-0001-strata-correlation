@@ -223,6 +223,70 @@ def compare(s):
     assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
 
 
+def dedupe(s):
+    p = replace(s, create(s, '去重剖面'), layers())
+    assert p['version'] == 2
+    path = f'/api/v1/profiles/{p["id"]}'
+    snapshot = s.directory / 'data' / 'strata.json'
+
+    def total():
+        return s.call('GET', f'{path}/history')['total']
+
+    assert total() == 2
+    stat = snapshot.stat()
+
+    # 仅数组顺序不同：返回当前剖面，不增加版本、不写事件、不重写快照
+    assert replace(s, p, list(reversed(layers()))) == p
+    assert total() == 2
+    rewritten = snapshot.stat()
+    assert rewritten.st_ino == stat.st_ino and rewritten.st_mtime_ns == stat.st_mtime_ns
+
+    # 仅分层文字首尾空白不同，规范化后同样无变化
+    padded = [dict(l, description='  ' + l.get('description', '') + '\t', marker=' ' + l['marker'] + ' ')
+              for l in layers()]
+    assert replace(s, p, padded) == p
+    assert total() == 2
+
+    # 仅元数据首尾空白不同，同样去重
+    body = dict(expected_version=p['version'], reason='重复提交元数据',
+                metadata=dict(name='  ' + p['name'] + ' ', site=p['site'],
+                              depth_mm=p['depth_mm'], note=p['note'] + '  '))
+    assert s.call('PUT', path, body) == p
+    assert total() == 2
+
+    # 过期版本或锁定状态即使内容相同仍按原规则拒绝
+    s.call('PUT', path + '/layers',
+           dict(expected_version=1, layers=list(reversed(layers())), reason='旧版本重放'), 409)
+    same_meta = dict(name=p['name'], site=p['site'], depth_mm=p['depth_mm'], note=p['note'])
+    s.call('PUT', path, dict(expected_version=1, metadata=same_meta, reason='旧版本重放'), 409)
+    assert total() == 2
+    locked = state(s, p, 'seal')
+    replace(s, locked, list(reversed(layers())), 409)
+    s.call('PUT', path, dict(expected_version=locked['version'], metadata=same_meta, reason='锁定后重提'), 409)
+    assert s.call('GET', path)['version'] == 3
+
+    # 无效输入不因内容“看起来相同”而绕过校验
+    s.call('PUT', path + '/layers', dict(expected_version=locked['version'], reason='缺少数组'), 422)
+    p = state(s, locked, 'reopen')
+    replace(s, p, [dict(top_mm=0, bottom_mm=6000, rock='shale'),
+                   dict(top_mm=5000, bottom_mm=10000, rock='mudstone')], 422)
+    assert total() == 4
+
+    # 真正的业务变化必须记录：标志层大小写、岩性改变都算变化
+    base = [dict(top_mm=0, bottom_mm=4000, rock='sandstone', marker='K-Bed'),
+            dict(top_mm=4000, bottom_mm=10000, rock='mudstone', description='泥岩', marker='')]
+    q = replace(s, create(s, '去重剖面二'), base)
+    assert replace(s, q, list(reversed(base))) == q
+    renamed = [dict(l) for l in base]
+    renamed[0]['marker'] = 'k-bed'
+    q = replace(s, q, renamed)
+    assert q['version'] == 3 and q['layers'][0]['marker'] == 'k-bed'
+    changed = [dict(l) for l in renamed]
+    changed[1]['rock'] = 'shale'
+    q = replace(s, q, changed)
+    assert q['version'] == 4 and q['layers'][1]['rock'] == 'shale'
+
+
 def browse(s):
     a = sealed(s, '赤石北剖面')
     b = create(s, '赤石南剖面')
@@ -245,9 +309,9 @@ def browse(s):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'dedupe', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'dedupe'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)
