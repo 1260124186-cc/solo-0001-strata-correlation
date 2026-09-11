@@ -51,6 +51,34 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 锁定成功返回版本 3。修改必须携带当前 `expected_version`；相同版本的并发请求只有一个成功，其余得到 HTTP 409。`ETag` 仅描述响应版本，写入以 JSON 中的 `expected_version` 为准。已锁定剖面需要通过 `/reopen` 重新打开，新版本不会改变历史记录。
 
+## 批量修订多份剖面
+
+`POST /api/v1/profiles/batch` 在一次请求中修订多份剖面，替代逐份提交：
+
+```json
+{
+  "items": [
+    {"id": "prf_…", "action": "layers", "expected_version": 2, "reason": "补充分层", "layers": []},
+    {"id": "prf_…", "action": "seal", "expected_version": 3, "reason": "核对完成"}
+  ]
+}
+```
+
+`action` 取 `metadata / layers / seal / reopen`，字段要求与对应单份接口一致：`metadata` 动作必须携带 `metadata` 对象，`layers` 动作必须携带 `layers` 数组，状态动作两者都不接受。单次最多 100 项，空数组返回 422。
+
+原子边界落在**单项**上：每一项独立校验，要么完整写入一个新版本、要么完全不写；某一项失败不影响其他项。各项按数组顺序应用，同一剖面可以在批次中出现多次，后一项看到前一项产生的新版本。所有成功项合并为**一次快照原子落盘**：磁盘只从批前状态整体切换到包含全部成功项的批后状态，不会出现只写了一半的剖面。进程在落盘前崩溃等于批次未发生；落盘后崩溃时成功项均已持久化，重启后可通过历史接口逐项核对，不存在无法解释的半批状态。
+
+请求合法时响应恒为 HTTP 200，按请求顺序逐项报告，失败项携带与单份接口相同结构的错误对象：
+
+```json
+{"results": [
+  {"id": "prf_…", "action": "layers", "ok": true, "version": 3, "state": "draft"},
+  {"id": "prf_…", "action": "seal", "ok": false, "error": {"code": "conflict", "detail": "预期版本 3，当前版本 2"}}
+]}
+```
+
+存储故障时整个请求返回 500，此时成功项可能已随快照落盘；按“持久化与恢复”的指引重启后读取版本确认结果，不要盲目重放。
+
 ## 对比两个锁定版本
 
 ```json
@@ -82,6 +110,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /profiles/{id}` | 当前完整剖面 |
 | `PUT /profiles/{id}` | `expected_version, reason, metadata` 整体替换元数据 |
 | `PUT /profiles/{id}/layers` | `expected_version, reason, layers` 整体替换分层 |
+| `POST /profiles/batch` | `items` 数组批量修订多份剖面，逐项返回成败 |
 | `GET /profiles/{id}/coverage` | 缺口、各岩性厚度和能否锁定 |
 | `GET /profiles/{id}/at` | 必填 `depth_mm`，可选 `version`；返回所属层或缺口 |
 | `POST /profiles/{id}/seal` | `expected_version, reason`，锁定当前版本 |
@@ -97,7 +126,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
 
-单个剖面最多 500 层、500 个历史版本，总深度最大 1000000 毫米。最多 2000 个剖面、10000 个对比结果，总快照上限 64 MiB。岩性支持 `sandstone / mudstone / limestone / shale / conglomerate / unknown`。名称最多 120 字、地点 200 字、说明 2000 字，单层描述 1000 字，标志层名称 80 字，修订理由 1–500 字。标志层名称在同一剖面内忽略大小写后必须唯一。
+单个剖面最多 500 层、500 个历史版本，总深度最大 1000000 毫米。最多 2000 个剖面、10000 个对比结果，单次批量修订最多 100 项，总快照上限 64 MiB。岩性支持 `sandstone / mudstone / limestone / shale / conglomerate / unknown`。名称最多 120 字、地点 200 字、说明 2000 字，单层描述 1000 字，标志层名称 80 字，修订理由 1–500 字。标志层名称在同一剖面内忽略大小写后必须唯一。
 
 差异接口按完整深度区间匹配分层；边界变化展示为原区间移除和新区间增加，相同区间中的岩性或描述修改展示前后值。深度查询使用左闭右开区间，边界点属于其下方分层，剖面底端不属于任何层。
 
@@ -118,7 +147,7 @@ python3 scripts/smoke.py all
 STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 ```
 
-**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
+**测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / batch / browse` 五个流程。
 
 验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
 

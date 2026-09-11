@@ -223,6 +223,44 @@ def compare(s):
     assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
 
 
+def batch(s):
+    a, b = create(s, '批量甲'), create(s, '批量乙')
+    missing = 'prf_' + '1' * 32
+    results = s.call('POST', '/api/v1/profiles/batch', dict(items=[
+        dict(id=a['id'], action='layers', expected_version=1, reason='甲分层', layers=layers()),
+        dict(id=b['id'], action='layers', expected_version=7, reason='版本错误', layers=layers()),
+        dict(id=missing, action='seal', expected_version=1, reason='不存在的剖面'),
+        dict(id=b['id'], action='layers', expected_version=1, reason='乙分层', layers=layers(6000)),
+    ]))['results']
+    assert [r['ok'] for r in results] == [True, False, False, True]
+    assert results[0]['version'] == 2 and results[3]['version'] == 2
+    assert results[1]['error']['code'] == 'conflict' and results[2]['error']['code'] == 'missing'
+    assert s.call('GET', f'/api/v1/profiles/{a["id"]}')['version'] == 2
+    assert s.call('GET', f'/api/v1/profiles/{b["id"]}')['version'] == 2
+    results = s.call('POST', '/api/v1/profiles/batch', dict(items=[
+        dict(id=a['id'], action='seal', expected_version=2, reason='锁定甲'),
+        dict(id=a['id'], action='reopen', expected_version=3, reason='重新打开甲'),
+        dict(id=a['id'], action='metadata', expected_version=4, reason='修订名称',
+             metadata=dict(name='批量甲改', site='赤石岭', depth_mm=10000, note='')),
+    ]))['results']
+    assert [r['ok'] for r in results] == [True] * 3
+    assert results[0]['state'] == 'sealed' and results[2]['state'] == 'draft'
+    assert s.call('GET', f'/api/v1/profiles/{a["id"]}')['name'] == '批量甲改'
+    item = dict(id=a['id'], action='layers', expected_version=5, reason='缺少分层数组')
+    failed = s.call('POST', '/api/v1/profiles/batch', dict(items=[item]))['results'][0]
+    assert not failed['ok'] and failed['error']['code'] == 'invalid'
+    s.call('POST', '/api/v1/profiles/batch', dict(items=[]), 422)
+    s.call('POST', '/api/v1/profiles/batch', dict(items=[item] * 101), 422)
+    s.call('POST', '/api/v1/profiles/batch', dict(items=[dict(item, extra=True)]), 422)
+    s.stop()
+    s.start()
+    final = s.call('GET', f'/api/v1/profiles/{a["id"]}')
+    assert final['version'] == 5 and final['state'] == 'draft'
+    history = s.call('GET', f'/api/v1/profiles/{a["id"]}/history')
+    assert [x['action'] for x in history['items']] == ['create', 'layers', 'seal', 'reopen', 'metadata']
+    assert s.call('GET', f'/api/v1/profiles/{b["id"]}')['version'] == 2
+
+
 def browse(s):
     a = sealed(s, '赤石北剖面')
     b = create(s, '赤石南剖面')
@@ -245,9 +283,9 @@ def browse(s):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'batch', 'browse', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'batch', 'browse'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

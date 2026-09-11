@@ -18,6 +18,7 @@ func New(service *catalog.Service, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("GET /healthz", h.health)
 	mux.HandleFunc("GET /api/v1/rocks", h.rocks)
 	mux.HandleFunc("POST /api/v1/profiles", h.create)
+	mux.HandleFunc("POST /api/v1/profiles/batch", h.batch)
 	mux.HandleFunc("GET /api/v1/profiles", h.list)
 	mux.HandleFunc("GET /api/v1/profiles/{id}", h.get)
 	mux.HandleFunc("PUT /api/v1/profiles/{id}", h.edit)
