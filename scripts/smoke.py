@@ -2,7 +2,9 @@
 """Run bounded HTTP checks in a disposable data directory using the real server."""
 import argparse
 import concurrent.futures
+import copy
 import csv
+import hashlib
 import io
 import json
 import os
@@ -243,11 +245,69 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def rewrite_snapshot(path, data):
+    payload = json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    digest = hashlib.sha256(payload).hexdigest()
+    path.write_text('{"digest":"%s","data":%s}' % (digest, payload.decode('utf-8')), encoding='utf-8')
+
+
+def refuse(s, data, marker):
+    rewrite_snapshot(s.directory / 'data' / 'strata.json', data)
+    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(s.directory / 'data')],
+                             capture_output=True, timeout=10)
+    assert attempt.returncode != 0 and marker in attempt.stderr, attempt.stderr
+
+
+def migrate(s):
+    a = sealed(s, '迁移西侧剖面')
+    b = sealed(s, '迁移东侧剖面', 6000)
+    request = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
+    result = s.call('POST', '/api/v1/comparisons', request, 201)
+    s.stop()
+    snapshot = s.directory / 'data' / 'strata.json'
+    stored = json.loads(snapshot.read_text())['data']
+    assert stored['schema'] == 2
+    assert stored['histories'][a['id']][-1]['profile']['recorder'] == ''
+    legacy = copy.deepcopy(stored)
+    legacy['schema'] = 1
+    for history in legacy['histories'].values():
+        for revision in history:
+            del revision['profile']['recorder']
+    rewrite_snapshot(snapshot, legacy)
+    s.start()
+    assert s.call('GET', f'/api/v1/profiles/{a["id"]}') == a
+    assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+    reopened = state(s, a, 'reopen')
+    body = dict(expected_version=reopened['version'],
+                metadata=dict(name=a['name'], site=a['site'], depth_mm=a['depth_mm'], note=a['note'], recorder='王工'),
+                reason='补充编录人')
+    assert s.call('PUT', f'/api/v1/profiles/{a["id"]}', body)['recorder'] == '王工'
+    s.stop()
+    upgraded = json.loads(snapshot.read_text())['data']
+    assert upgraded['schema'] == 2
+    profiles = [r['profile'] for h in upgraded['histories'].values() for r in h]
+    assert all('recorder' in p for p in profiles)
+    assert upgraded['histories'][a['id']][-1]['profile']['recorder'] == '王工'
+    damaged = copy.deepcopy(upgraded)
+    damaged['histories'][a['id']][0]['profile']['extra_field'] = 1
+    refuse(s, damaged, b'unknown field')
+    damaged = copy.deepcopy(upgraded)
+    damaged['schema'] = 99
+    refuse(s, damaged, b'unsupported snapshot schema')
+    damaged = copy.deepcopy(upgraded)
+    damaged['schema'] = 1
+    refuse(s, damaged, b'unknown field')
+    rewrite_snapshot(snapshot, upgraded)
+    s.start()
+    assert s.call('GET', f'/api/v1/profiles/{a["id"]}')['recorder'] == '王工'
+    assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'migrate', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'migrate'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

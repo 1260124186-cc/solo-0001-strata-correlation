@@ -15,7 +15,7 @@ type State struct {
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{Schema: schemaCurrent, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
 }
 
 func (s State) Clone() State {
@@ -53,7 +53,7 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 }
 
 func (s State) Validate() error {
-	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
+	if s.Schema != schemaCurrent || s.Histories == nil || s.Comparisons == nil {
 		return fmt.Errorf("unsupported snapshot shape")
 	}
 	for id, history := range s.Histories {

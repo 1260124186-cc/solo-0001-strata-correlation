@@ -17,10 +17,11 @@ const (
 )
 
 type Metadata struct {
-	Name    string `json:"name"`
-	Site    string `json:"site"`
-	DepthMM int64  `json:"depth_mm"`
-	Note    string `json:"note"`
+	Name     string `json:"name"`
+	Site     string `json:"site"`
+	DepthMM  int64  `json:"depth_mm"`
+	Note     string `json:"note"`
+	Recorder string `json:"recorder"`
 }
 
 type Profile struct {
@@ -53,11 +54,13 @@ func NormalizeMetadata(m Metadata) (Metadata, error) {
 	m.Name = strings.TrimSpace(m.Name)
 	m.Site = strings.TrimSpace(m.Site)
 	m.Note = strings.TrimSpace(m.Note)
+	m.Recorder = strings.TrimSpace(m.Recorder)
 	for _, f := range []struct {
 		name, value string
 		min, max    int
 	}{
 		{"name", m.Name, 1, 120}, {"site", m.Site, 1, 200}, {"note", m.Note, 0, 2000},
+		{"recorder", m.Recorder, 0, 120},
 	} {
 		if err := Text(f.name, f.value, f.min, f.max); err != nil {
 			return m, err
