@@ -24,8 +24,21 @@ func (s *Service) Compare(ctx context.Context, input correlation.Request) (corre
 	reused := false
 	err := s.repo.Update(ctx, func(state *persistence.State) (bool, error) {
 		if cached, ok := state.Comparisons[input.Key()]; ok {
-			result = cached.Clone()
+			materialized, err := state.Materialize(cached)
+			if err != nil {
+				return false, err
+			}
+			result = materialized
 			reused = true
+			// Old snapshots still embed the per-segment detail. Compact it
+			// only when the detail reproduces from the locked revisions;
+			// otherwise keep the embedded record untouched and readable.
+			if cached.IsLegacy() {
+				if compact, ok := recompact(state, cached, input); ok {
+					state.Comparisons[input.Key()] = compact
+					return true, nil
+				}
+			}
 			return false, nil
 		}
 		if len(state.Comparisons) >= 10000 {
@@ -43,20 +56,43 @@ func (s *Service) Compare(ctx context.Context, input correlation.Request) (corre
 		if err != nil {
 			return false, err
 		}
-		state.Comparisons[result.ID] = result.Clone()
+		state.Comparisons[result.ID] = correlation.NewRecord(result)
 		return true, nil
 	})
 	return result, reused, err
 }
 
+// recompact turns a legacy record into a compact one only when recomputing
+// from the referenced revisions reproduces the originally returned content
+// (pinned by the record's content digest).
+func recompact(state *persistence.State, cached correlation.Record, input correlation.Request) (correlation.Record, bool) {
+	left, err := state.Revision(input.Left.ID, input.Left.Version)
+	if err != nil {
+		return correlation.Record{}, false
+	}
+	right, err := state.Revision(input.Right.ID, input.Right.Version)
+	if err != nil {
+		return correlation.Record{}, false
+	}
+	computed, err := correlation.Align(left.Profile, right.Profile, input, cached.CreatedAt)
+	if err != nil || correlation.ContentDigest(computed) != cached.Summary.Digest {
+		return correlation.Record{}, false
+	}
+	return correlation.NewRecord(computed), true
+}
+
 func (s *Service) Comparison(ctx context.Context, id string) (correlation.Result, error) {
 	var result correlation.Result
 	err := s.repo.View(ctx, func(state persistence.State) error {
-		v, exists := state.Comparisons[id]
+		record, exists := state.Comparisons[id]
 		if !exists {
 			return geology.Missing("对比结果不存在")
 		}
-		result = v.Clone()
+		materialized, err := state.Materialize(record)
+		if err != nil {
+			return err
+		}
+		result = materialized
 		return nil
 	})
 	return result, err
@@ -66,31 +102,37 @@ func (s *Service) Comparisons(ctx context.Context, profile string, offset, limit
 	if offset < 0 || offset > 1000000 || limit < 1 || limit > 100 {
 		return ComparisonPage{}, geology.Invalid("pagination", "分页参数超出范围")
 	}
-	result := ComparisonPage{Items: []correlation.Result{}, Offset: offset, Limit: limit}
+	page := ComparisonPage{Items: []correlation.Result{}, Offset: offset, Limit: limit}
 	err := s.repo.View(ctx, func(state persistence.State) error {
 		if profile != "" {
 			if _, err := state.Latest(profile); err != nil {
 				return err
 			}
 		}
-		all := make([]correlation.Result, 0)
-		for _, v := range state.Comparisons {
-			if profile != "" && v.Request.Left.ID != profile && v.Request.Right.ID != profile {
+		records := make([]correlation.Record, 0)
+		for _, record := range state.Comparisons {
+			if profile != "" && record.Request.Left.ID != profile && record.Request.Right.ID != profile {
 				continue
 			}
-			all = append(all, v.Clone())
+			records = append(records, record)
 		}
-		sort.Slice(all, func(i, j int) bool {
-			if !all[i].CreatedAt.Equal(all[j].CreatedAt) {
-				return all[i].CreatedAt.After(all[j].CreatedAt)
+		sort.Slice(records, func(i, j int) bool {
+			if !records[i].CreatedAt.Equal(records[j].CreatedAt) {
+				return records[i].CreatedAt.After(records[j].CreatedAt)
 			}
-			return all[i].ID < all[j].ID
+			return records[i].ID < records[j].ID
 		})
-		result.Total = len(all)
-		start := min(offset, len(all))
-		end := min(start+limit, len(all))
-		result.Items = all[start:end]
+		page.Total = len(records)
+		start := min(offset, len(records))
+		end := min(start+limit, len(records))
+		for _, record := range records[start:end] {
+			result, err := state.Materialize(record)
+			if err != nil {
+				return err
+			}
+			page.Items = append(page.Items, result)
+		}
 		return nil
 	})
-	return result, err
+	return page, err
 }

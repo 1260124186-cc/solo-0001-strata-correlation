@@ -1,7 +1,6 @@
 package persistence
 
 import (
-	"encoding/json"
 	"fmt"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
@@ -11,11 +10,11 @@ import (
 type State struct {
 	Schema      int                           `json:"schema"`
 	Histories   map[string][]geology.Revision `json:"histories"`
-	Comparisons map[string]correlation.Result `json:"comparisons"`
+	Comparisons map[string]correlation.Record `json:"comparisons"`
 }
 
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Record{}}
 }
 
 func (s State) Clone() State {
@@ -27,8 +26,8 @@ func (s State) Clone() State {
 		}
 		out.Histories[id] = copies
 	}
-	for id, result := range s.Comparisons {
-		out.Comparisons[id] = result.Clone()
+	for id, record := range s.Comparisons {
+		out.Comparisons[id] = record.Clone()
 	}
 	return out
 }
@@ -50,6 +49,21 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 		return geology.Revision{}, geology.Missing("历史版本不存在")
 	}
 	return history[version-1].Clone(), nil
+}
+
+// Materialize reproduces the full comparison result for a stored record.
+// List, detail, CSV and startup validation all use this single path, so the
+// segment detail can never differ between surfaces.
+func (s State) Materialize(record correlation.Record) (correlation.Result, error) {
+	left, err := s.Revision(record.Request.Left.ID, record.Request.Left.Version)
+	if err != nil {
+		return correlation.Result{}, err
+	}
+	right, err := s.Revision(record.Request.Right.ID, record.Request.Right.Version)
+	if err != nil {
+		return correlation.Result{}, err
+	}
+	return record.Materialize(left.Profile, right.Profile)
 }
 
 func (s State) Validate() error {
@@ -85,26 +99,12 @@ func (s State) Validate() error {
 			}
 		}
 	}
-	for id, result := range s.Comparisons {
-		if id != result.ID || id != result.Request.Key() || result.Algorithm != correlation.Algorithm || result.CreatedAt.IsZero() {
+	for id, record := range s.Comparisons {
+		if id != record.ID || id != record.Request.Key() || record.Algorithm != correlation.Algorithm || record.CreatedAt.IsZero() {
 			return fmt.Errorf("invalid comparison identity")
 		}
-		a, err := s.Revision(result.Request.Left.ID, result.Request.Left.Version)
-		if err != nil {
-			return err
-		}
-		b, err := s.Revision(result.Request.Right.ID, result.Request.Right.Version)
-		if err != nil {
-			return err
-		}
-		computed, err := correlation.Align(a.Profile, b.Profile, result.Request, result.CreatedAt)
-		if err != nil {
-			return err
-		}
-		expected, _ := json.Marshal(computed)
-		actual, _ := json.Marshal(result)
-		if string(expected) != string(actual) {
-			return fmt.Errorf("comparison data mismatch")
+		if _, err := s.Materialize(record); err != nil {
+			return fmt.Errorf("invalid comparison %s: %w", id, err)
 		}
 	}
 	return nil

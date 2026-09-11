@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,21 @@ import (
 )
 
 const maxSnapshot = 64 << 20
+
+// CapacityError means the next snapshot would exceed the on-disk limit. The
+// write is rejected before any temporary file is created, so no over-limit
+// data ever reaches the data directory.
+type CapacityError struct{ Size int }
+
+func (e *CapacityError) Error() string {
+	return fmt.Sprintf("snapshot capacity of 64 MiB reached (need %d bytes)", e.Size)
+}
+
+// IsCapacity reports whether err is a snapshot capacity rejection.
+func IsCapacity(err error) bool {
+	var capacity *CapacityError
+	return errors.As(err, &capacity)
+}
 
 type envelope struct {
 	Digest string          `json:"digest"`
@@ -63,8 +79,10 @@ func writeSnapshot(path string, state State) (committed bool, err error) {
 	if err != nil {
 		return false, err
 	}
+	// Capacity is decided before any file is touched: an over-limit state is
+	// rejected outright instead of being written and reported afterwards.
 	if len(contents) > maxSnapshot {
-		return false, fmt.Errorf("snapshot capacity of 64 MiB reached")
+		return false, &CapacityError{Size: len(contents)}
 	}
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".strata-*")

@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"fmt"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"os"
 	"path/filepath"
 	"sync"
@@ -86,6 +87,9 @@ func (r *Repository) Update(ctx context.Context, fn func(*State) (bool, error)) 
 	if err != nil {
 		if committed {
 			r.fault = err
+		}
+		if IsCapacity(err) {
+			return geology.Conflict("持久化快照达到 64 MiB 容量上限，本次结果未保存")
 		}
 		return fmt.Errorf("persist snapshot: %w", err)
 	}
