@@ -310,6 +310,24 @@ def batch(s):
     assert [x['status'] for x in malformed['items']] == ['failed', 'failed', 'failed']
     assert [x['error_code'] for x in malformed['items']] == ['invalid', 'invalid', 'invalid']
     s.call('GET', '/api/v1/profile-revisions/batch/bat_' + '0' * 32, expected=404)
+
+    # 回归：空剖面编号、版本号 0/负数、空动作、空理由的失败条目必须以
+    # 可校验的形状落盘。进程重启后整个数据目录必须仍可打开，且台账
+    # 逐条保留失败结果，而不是 snapshot validation 拒绝启动。
+    invalid = s.call('POST', '/api/v1/profile-revisions/batch', dict(items=[
+        dict(profile_id='   ', action='seal', expected_version=0),
+        dict(profile_id='', action='', expected_version=-3, reason=''),
+        dict(profile_id='prf_' + '0' * 32, action='seal', expected_version=0),
+        dict(profile_id='prf_' + '0' * 32, action='bogus', expected_version=0, reason='  '),
+    ]), 201)
+    assert invalid['status'] == 'completed'
+    assert [(x['status'], x['error_code']) for x in invalid['items']] == [
+        ('failed', 'invalid'), ('failed', 'invalid'),
+        ('failed', 'invalid'), ('failed', 'invalid')]
+    s.stop()
+    s.start()
+    persisted = s.call('GET', f"/api/v1/profile-revisions/batch/{invalid['id']}")
+    assert persisted == invalid, (persisted, invalid)
     # 完成的批次重启后仍可查，剖面修订不丢
     s.stop()
     s.start()
@@ -326,6 +344,10 @@ def batch(s):
     assert batch['status'] == 'completed'
     batch['status'] = 'running'
     del batch['items'][4:]
+    # 追加一个空编号、版本 0、空动作、空理由的非法 pending 条目：
+    # 它恢复后必须成为可校验的 not_attempted，而不是让目录不可打开。
+    batch['items'].append(dict(profile_id='', action='', expected_version=0,
+                               status='pending', reason=''))
     for item in batch['items'][1:]:
         item['status'] = 'pending'
         item['error_code'] = ''
@@ -337,7 +359,7 @@ def batch(s):
     recovered = s.call('GET', f"/api/v1/profile-revisions/batch/{result['id']}")
     assert recovered['status'] == 'interrupted', recovered
     assert recovered['items'][0]['status'] == 'success'
-    assert len(recovered['items']) == 4
+    assert len(recovered['items']) == 5
     assert all(x['status'] == 'not_attempted' and x['error_code'] == 'interrupted'
                for x in recovered['items'][1:]), recovered
     # 恢复写回的快照本身必须可再次打开（在任何新写入之前验证）

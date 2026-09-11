@@ -255,29 +255,25 @@ func (b BatchRecord) validate(id string, s State) error {
 }
 
 func (it BatchItem) validate() error {
-	// 成功条目必须精确对应一次剖面修订（形状由关联的历史修订保证）；
-	// 失败或未执行条目保留用户原始请求，目标与动作非空即可。
+	// 仅成功条目参与剖面一致性检查，其形状由关联的历史修订保证。
+	// failed / pending / not_attempted 条目原样保留用户请求（可能
+	// 包含空编号、版本 0、空动作或空理由），不能因输入本身非法而让
+	// 整张台账在下次启动时不可读；这些状态只校验各自的结果一致性。
 	if it.Status == ItemSuccess {
 		if !geology.ValidID(it.ProfileID, "prf_") {
 			return fmt.Errorf("invalid item target")
 		}
-	} else if it.ProfileID == "" {
-		return fmt.Errorf("invalid item target")
-	}
-	if it.ExpectedVersion < 1 {
-		return fmt.Errorf("invalid expected version")
-	}
-	if it.Status == ItemSuccess {
+		if it.ExpectedVersion < 1 {
+			return fmt.Errorf("invalid expected version")
+		}
 		switch it.Action {
 		case "metadata", "layers", "seal", "reopen":
 		default:
 			return fmt.Errorf("unknown item action")
 		}
-	} else if it.Action == "" {
-		return fmt.Errorf("empty item action")
-	}
-	if err := geology.Text("reason", it.Reason, 1, 500); err != nil {
-		return err
+		if err := geology.Text("reason", it.Reason, 1, 500); err != nil {
+			return err
+		}
 	}
 	switch it.Status {
 	case ItemSuccess:
