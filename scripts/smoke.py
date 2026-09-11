@@ -279,34 +279,67 @@ def diagnose(s):
     for secret in ('西侧诊断剖面', '东侧诊断剖面', '凝灰标志'):
         assert secret not in leaked
 
-    # 遗留临时文件只产生告警，不影响可启动结论，且不被自动清理。
+    # 遗留临时文件只产生 warning，不影响可启动结论，且不被自动清理。
     leftover = data_dir / '.strata-smoke-leftover'
     leftover.write_text('partial')
     report, _ = s.diag()
     assert report['startable'] is True and report['leftover_temp_files'] == 1
     recovery = next(a for a in report['areas'] if a['name'] == 'recoverability')
     assert recovery['status'] == 'warn'
+    assert recovery['findings'] == [{
+        'code': 'leftover_temp_files', 'area': 'recoverability',
+        'severity': 'warning', 'detail': recovery['findings'][0]['detail'],
+    }]
     assert leftover.exists()
-    leftover.unlink()
 
     snapshot = data_dir / 'strata.json'
     original = snapshot.read_bytes()
 
-    # 校验值损坏：诊断判为不可启动、结构化报告指出校验区域，正常启动同样拒绝。
+    def area_of(report, name):
+        return next(a for a in report['areas'] if a['name'] == name)
+
+    def codes(report, name):
+        return [(f['code'], f['severity']) for f in area_of(report, name)['findings']]
+
+    def assert_fatal(report, normal_stderr):
+        """任何致命失败：受影响区域为 fail/blocked，可恢复性必须保持 fail，
+        遗留临时文件只能作为附加 warning 存在。"""
+        assert report['startable'] is False
+        assert report['recoverability']['status'] == 'fail'
+        assert report['recoverability']['auto_recoverable'] is False
+        recovery_area = area_of(report, 'recoverability')
+        assert recovery_area['status'] == 'fail'
+        assert codes(report, 'recoverability') == [
+            ('snapshot_unstartable', 'error'), ('leftover_temp_files', 'warning')]
+        assert leftover.exists()
+        attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(data_dir)],
+                                 capture_output=True, timeout=10)
+        assert attempt.returncode != 0 and normal_stderr in attempt.stderr
+
+    # 校验值损坏叠加遗留临时文件：诊断判为不可启动，后续区域 blocked。
     damaged = json.loads(original)
     damaged['digest'] = '0' * 64
     snapshot.write_text(json.dumps(damaged, ensure_ascii=False))
     report, _ = s.diag(expected=1)
-    assert report['startable'] is False
-    checksum = next(a for a in report['areas'] if a['name'] == 'snapshot_checksum')
-    assert [f['code'] for f in checksum['findings']] == ['snapshot_checksum_mismatch']
-    chain = next(a for a in report['areas'] if a['name'] == 'version_chain')
-    references = next(a for a in report['areas'] if a['name'] == 'comparison_references')
-    assert chain['status'] == 'blocked' and references['status'] == 'blocked'
-    assert report['recoverability']['auto_recoverable'] is False
-    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(data_dir)],
-                             capture_output=True, timeout=10)
-    assert attempt.returncode != 0 and b'checksum mismatch' in attempt.stderr
+    assert codes(report, 'snapshot_checksum') == [('snapshot_checksum_mismatch', 'error')]
+    assert area_of(report, 'version_chain')['status'] == 'blocked'
+    assert area_of(report, 'comparison_references')['status'] == 'blocked'
+    assert_fatal(report, b'checksum mismatch')
+
+    # 形状不受支持（schema 非法）但摘要有效：版本链给出致命结论，
+    # 对比引用实际未执行，必须是 blocked 而不是 pass；可恢复性仍为 fail。
+    envelope = json.loads(original)
+    envelope['data']['schema'] = 999
+    raw = json.dumps(envelope['data'], ensure_ascii=False, separators=(',', ':'))
+    digest = hashlib.sha256(raw.encode()).hexdigest()
+    snapshot.write_text('{"digest":' + json.dumps(digest) + ',"data":' + raw + '}')
+    report, _ = s.diag(expected=1)
+    assert report['startable'] is False and report['snapshot']['digest_ok'] is True
+    chain = area_of(report, 'version_chain')
+    assert chain['status'] == 'fail'
+    assert codes(report, 'version_chain') == [('snapshot_shape_unsupported', 'error')]
+    assert area_of(report, 'comparison_references')['status'] == 'blocked'
+    assert_fatal(report, b'unsupported snapshot shape')
 
     # 校验值有效但版本链语义损坏：定位到具体剖面版本，结论仍与正常启动一致。
     envelope = json.loads(original)
@@ -317,17 +350,19 @@ def diagnose(s):
     snapshot.write_text('{"digest":' + json.dumps(digest) + ',"data":' + raw + '}')
     report, _ = s.diag(expected=1)
     assert report['startable'] is False and report['snapshot']['digest_ok'] is True
-    chain = next(a for a in report['areas'] if a['name'] == 'version_chain')
+    chain = area_of(report, 'version_chain')
     assert chain['status'] == 'fail' and chain['findings'][0]['code'] == 'step_unknown_action'
+    assert chain['findings'][0]['severity'] == 'error'
     assert chain['findings'][0]['location'] == f'{profile_id}#v2'
-    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(data_dir)],
-                             capture_output=True, timeout=10)
-    assert attempt.returncode != 0 and b'unknown revision action' in attempt.stderr
+    assert_fatal(report, b'unknown revision action')
 
-    # 恢复后诊断通过，正常启动也必须成功。
+    # 恢复并清理临时文件后诊断通过，正常启动也必须成功。
     snapshot.write_bytes(original)
+    leftover.unlink()
     report, _ = s.diag()
     assert report['startable'] is True
+    assert area_of(report, 'recoverability')['status'] == 'pass'
+    assert codes(report, 'recoverability') == []
     s.start()
     assert s.call('GET', f'/api/v1/comparisons/{comparison["id"]}') == comparison
 

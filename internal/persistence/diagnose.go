@@ -24,6 +24,9 @@ const (
 // findings 只携带稳定代码、定位信息和固定说明，不包含任何剖面名称、
 // 地点、说明、分层描述或标志层名称等资料正文。
 const (
+	severityError   = "error"
+	severityWarning = "warning"
+
 	codeShapeUnsupported   = "snapshot_shape_unsupported"
 	codeHistoryEmpty       = "history_empty"
 	codeRevisionIdentity   = "revision_identity_mismatch"
@@ -46,11 +49,15 @@ const (
 	codeSnapshotEnvelope = "snapshot_envelope_invalid"
 	codeSnapshotChecksum = "snapshot_checksum_mismatch"
 	codeSnapshotDecode   = "snapshot_data_unreadable"
+
+	codeUnstartable  = "snapshot_unstartable"
+	codeLeftoverTemp = "leftover_temp_files"
 )
 
 type Finding struct {
 	Code     string `json:"code"`
 	Area     string `json:"area"`
+	Severity string `json:"severity"`
 	Location string `json:"location,omitempty"`
 	Field    string `json:"field,omitempty"`
 	Detail   string `json:"detail"`
@@ -118,6 +125,8 @@ var findingDetail = map[string]string{
 	codeSnapshotEnvelope:   "快照不是有效的校验封装",
 	codeSnapshotChecksum:   "快照 SHA-256 校验值不匹配",
 	codeSnapshotDecode:     "快照数据无法解析",
+	codeUnstartable:        "快照未通过启动校验，正常启动会拒绝该数据目录",
+	codeLeftoverTemp:       "存在遗留的原子写临时文件；它不参与恢复，可在服务停止后清理",
 }
 
 func detailFor(code string) string {
@@ -125,6 +134,14 @@ func detailFor(code string) string {
 		return d
 	}
 	return "快照校验未通过"
+}
+
+func errorFinding(code, area string) Finding {
+	return Finding{Code: code, Area: area, Severity: severityError, Detail: detailFor(code)}
+}
+
+func warningFinding(code, area, detail string) Finding {
+	return Finding{Code: code, Area: area, Severity: severityWarning, Detail: detail}
 }
 
 // Diagnose 以与 Open 完全相同的独占锁和读取/校验步骤检查数据目录，
@@ -165,34 +182,35 @@ func Diagnose(dir string) (Report, error) {
 	hardCode := stageFindingCode(load.stage)
 	checksumFindings := []Finding{}
 	if hardCode != "" {
-		checksumFindings = append(checksumFindings, Finding{
-			Code: hardCode, Area: AreaChecksum, Detail: detailFor(hardCode),
-		})
+		checksumFindings = append(checksumFindings, errorFinding(hardCode, AreaChecksum))
 	}
 	report.Areas = append(report.Areas, Area{
-		Name: AreaChecksum, Status: simpleStatus(checksumFindings), Findings: checksumFindings,
+		Name: AreaChecksum, Status: areaStatus(checksumFindings, false), Findings: checksumFindings,
 	})
 
-	// 版本链与对比引用只有在快照可解析后才能检查；读取、容量、封装或
-	// 校验值阶段失败时阻断。无论成功还是 validation 阶段失败，都运行
-	// 与 State.Validate 同一个 validateFindings，保证结论同源。
+	// 版本链与对比引用依赖快照可解析。读取、容量、封装、校验值或 JSON
+	// 解析阶段失败时两者都无法执行；语义校验阶段（validation）则运行与
+	// State.Validate 同一个 validateFindings。形状不受支持在版本链闸口
+	// 短路，对比引用区域同样不得标记为已检查。
 	chainFindings, refFindings := []Finding{}, []Finding{}
-	blocked := hardCode != ""
-	if !blocked {
+	hardBlocked := hardCode != ""
+	if !hardBlocked {
 		chainFindings, refFindings = splitStateFindings(validateFindings(load.state))
 	}
+	shapeBlocked := hasCode(chainFindings, codeShapeUnsupported)
 	report.Areas = append(report.Areas, Area{
 		Name:     AreaVersionChain,
-		Status:   derivedStatus(chainFindings, blocked),
+		Status:   areaStatus(chainFindings, hardBlocked),
 		Findings: chainFindings,
 	})
 	report.Areas = append(report.Areas, Area{
 		Name:     AreaComparisonRef,
-		Status:   derivedStatus(refFindings, blocked),
+		Status:   areaStatus(refFindings, hardBlocked || shapeBlocked),
 		Findings: refFindings,
 	})
 
-	if report.Startable = load.err == nil; report.Startable {
+	report.Startable = load.err == nil
+	if report.Startable {
 		report.Recovery = RecoveryView{
 			Status: "pass", AutoRecoverable: true,
 			Detail: "快照完整，正常启动可直接加载当前状态",
@@ -203,22 +221,31 @@ func Diagnose(dir string) (Report, error) {
 			Detail: "快照未通过启动校验；诊断不会自动修复，需从停止服务后的备份恢复数据目录",
 		}
 	}
+	// 致命校验失败始终保持 fail；遗留临时文件只是附加 warning，
+	// 不得把 fail 降级成 warn，也不改变 startable 结论。
 	recoveryFindings := []Finding{}
-	recoveryStatus := report.Recovery.Status
+	if !report.Startable {
+		recoveryFindings = append(recoveryFindings, errorFinding(codeUnstartable, AreaRecoverable))
+	}
 	if tempCount > 0 {
-		recoveryStatus = "warn"
-		recoveryFindings = append(recoveryFindings, Finding{
-			Code: "leftover_temp_files", Area: AreaRecoverable,
-			Detail: "存在遗留的原子写临时文件；它不参与恢复，可在服务停止后清理",
-		})
+		recoveryFindings = append(recoveryFindings, warningFinding(codeLeftoverTemp, AreaRecoverable, detailFor(codeLeftoverTemp)))
 	}
 	report.Areas = append(report.Areas, Area{
-		Name: AreaRecoverable, Status: recoveryStatus, Findings: recoveryFindings,
+		Name: AreaRecoverable, Status: areaStatus(recoveryFindings, false), Findings: recoveryFindings,
 	})
 	for _, area := range report.Areas {
 		report.TotalFindings += len(area.Findings)
 	}
 	return report, nil
+}
+
+func hasCode(findings []Finding, code string) bool {
+	for _, f := range findings {
+		if f.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func stageFindingCode(stage string) string {
@@ -254,16 +281,20 @@ func countTempFiles(dir string) int {
 	return count
 }
 
-func simpleStatus(findings []Finding) string {
-	if len(findings) > 0 {
-		return "fail"
+// areaStatus 汇总一个区域的严重级别：任一 error 即 fail；否则存在
+// warning 为 warn；没有结论且因前置失败未执行才是 blocked；都不是则 pass。
+func areaStatus(findings []Finding, blocked bool) string {
+	warning := false
+	for _, f := range findings {
+		if f.Severity == severityError {
+			return "fail"
+		}
+		if f.Severity == severityWarning {
+			warning = true
+		}
 	}
-	return "pass"
-}
-
-func derivedStatus(findings []Finding, blocked bool) string {
-	if len(findings) > 0 {
-		return "fail"
+	if warning {
+		return "warn"
 	}
 	if blocked {
 		return "blocked"
@@ -272,11 +303,12 @@ func derivedStatus(findings []Finding, blocked bool) string {
 }
 
 // splitStateFindings 把同一批验证结论分到版本链和对比引用两个区域。
+// 所有语义结论都是致命的 error 级别。
 func splitStateFindings(items []stateFinding) (chain, refs []Finding) {
 	chain, refs = []Finding{}, []Finding{}
 	for _, item := range items {
 		f := Finding{
-			Code: item.code, Location: item.location, Field: item.field,
+			Code: item.code, Severity: severityError, Location: item.location, Field: item.field,
 			Detail: detailFor(item.code),
 		}
 		switch item.code {
