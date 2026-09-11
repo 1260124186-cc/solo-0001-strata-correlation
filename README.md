@@ -67,6 +67,8 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 相同输入和算法版本生成同一编号，首次返回 HTTP 201，重复请求返回 HTTP 200 和原结果。交换左右或修改偏移属于不同输入。`GET /api/v1/comparisons/{id}/csv` 导出固定字段的区间 CSV，字段只包含数值、岩性代码和关系代码。
 
+CSV 导出有两种并存的格式，通过 `format` 查询参数显式选择。默认格式（省略参数或 `format=default`）的列为 `top_mm, bottom_mm, thickness_mm, left_rock, right_rock, relation`。`format=detailed` 选择详细格式，便于回到两份原剖面的深度位置复核，列依次为 `comparison_id, left_id, left_version, right_id, right_version, offset_mm, top_mm, bottom_mm, right_top_mm, right_bottom_mm, thickness_mm, left_rock, right_rock, relation`。详细格式中 `top_mm / bottom_mm` 是共同坐标，即左侧原始坐标；`right_top_mm / right_bottom_mm` 是右侧原始坐标区间，换算规则为 `右侧 = 共同 − offset_mm`，正负偏移同样适用。两种格式的列名与列序在算法版本 `interval-v1` 内固定不变，任何列调整只能随新算法版本发布。CSV 内容全部取自保存的对比结果及其绑定的历史版本，与结果详情 JSON 的区间和关系逐项一致，不以剖面当前状态替代；其他 `format` 取值、重复或未知查询参数返回 422。
+
 `POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
 ## HTTP 接口
@@ -93,7 +95,7 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `POST /comparisons` | `left, right, offset_mm`，生成或复用对比 |
 | `GET /comparisons` | 可选 `profile_id, offset, limit` |
 | `GET /comparisons/{id}` | 已保存的完整对比结果 |
-| `GET /comparisons/{id}/csv` | 区间 CSV |
+| `GET /comparisons/{id}/csv` | 区间 CSV，`format=detailed` 选择详细格式 |
 
 上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
 
@@ -120,7 +122,7 @@ STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
 
 **测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、默认与详细 CSV、列表筛选与分页。
 
 ## 目录
 

@@ -199,18 +199,63 @@ def seal(s):
     assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == current
 
 
+DETAILED_HEADER = ['comparison_id', 'left_id', 'left_version', 'right_id', 'right_version', 'offset_mm',
+                   'top_mm', 'bottom_mm', 'right_top_mm', 'right_bottom_mm',
+                   'thickness_mm', 'left_rock', 'right_rock', 'relation']
+
+
+def check_detailed(s, result):
+    detail = s.call('GET', f'/api/v1/comparisons/{result["id"]}')
+    text = s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv?format=detailed', raw=True)
+    reader = csv.DictReader(io.StringIO(text))
+    assert reader.fieldnames == DETAILED_HEADER, reader.fieldnames
+    rows = list(reader)
+    request = detail['request']
+    assert len(rows) == len(detail['segments']) and len(rows) > 0
+    for row, segment in zip(rows, detail['segments']):
+        assert row['comparison_id'] == detail['id']
+        assert row['left_id'] == request['left']['id']
+        assert int(row['left_version']) == request['left']['version']
+        assert row['right_id'] == request['right']['id']
+        assert int(row['right_version']) == request['right']['version']
+        assert int(row['offset_mm']) == request['offset_mm']
+        top, bottom = segment['top_mm'], segment['bottom_mm']
+        assert int(row['top_mm']) == top and int(row['bottom_mm']) == bottom
+        assert int(row['thickness_mm']) == bottom - top
+        right_top, right_bottom = top - request['offset_mm'], bottom - request['offset_mm']
+        assert int(row['right_top_mm']) == right_top and int(row['right_bottom_mm']) == right_bottom
+        assert row['left_rock'] == segment['left_rock'] and row['right_rock'] == segment['right_rock']
+        assert row['relation'] == segment['relation']
+        left_at = s.call('GET', f'/api/v1/profiles/{request["left"]["id"]}/at'
+                                f'?depth_mm={top}&version={request["left"]["version"]}')
+        assert left_at['layer']['rock'] == segment['left_rock']
+        right_at = s.call('GET', f'/api/v1/profiles/{request["right"]["id"]}/at'
+                                 f'?depth_mm={right_top}&version={request["right"]["version"]}')
+        assert right_at['layer']['rock'] == segment['right_rock']
+
+
 def compare(s):
     a, b = sealed(s, '西侧剖面'), sealed(s, '东侧剖面', 6000)
     request = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
     result = s.call('POST', '/api/v1/comparisons', request, 201)
     assert result['overlap_mm'] == 10000 and result['equal_mm'] == 8000 and result['similarity'] == .8
     assert s.call('POST', '/api/v1/comparisons', request) == result
-    rows = list(csv.DictReader(io.StringIO(s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv', raw=True))))
+    default_csv = s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv', raw=True)
+    rows = list(csv.DictReader(io.StringIO(default_csv)))
     assert len(rows) == 3 and sum(int(r['thickness_mm']) for r in rows) == 10000
+    assert s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv?format=default', raw=True) == default_csv
+    check_detailed(s, result)
     proposal = s.call('POST', '/api/v1/comparison-offsets', dict(left=request['left'], right=request['right']))
     assert proposal['comparison']['offset_mm'] == -2000 and not proposal['ambiguous']
     aligned = s.call('POST', '/api/v1/comparisons', proposal['comparison'], 201)
     assert aligned['similarity'] == 1 and aligned['overlap_mm'] == 8000
+    check_detailed(s, aligned)
+    forward = s.call('POST', '/api/v1/comparisons', {**request, 'offset_mm': 2000}, 201)
+    assert forward['overlap_mm'] == 8000 and forward['equal_mm'] == 4000
+    check_detailed(s, forward)
+    s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv?format=verbose', expected=422)
+    s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv?format=default&format=detailed', expected=422)
+    s.call('GET', f'/api/v1/comparisons/{result["id"]}/csv?extra=1', expected=422)
     s.call('POST', '/api/v1/comparisons', {**request, 'offset_mm': 10000}, 409)
     s.call('POST', '/api/v1/comparisons', {**request, 'left': dict(id=a['id'], version=2)}, 409)
     c = state(s, replace(s, create(s, '待识别岩性'), [dict(top_mm=0, bottom_mm=10000, rock='unknown')]), 'seal')
@@ -218,9 +263,11 @@ def compare(s):
     assert unknown['known_mm'] == 0 and unknown['similarity'] is None
     state(s, a, 'reopen')
     assert s.call('POST', '/api/v1/comparisons', request) == result
+    check_detailed(s, result)
     s.stop()
     s.start()
     assert s.call('GET', f'/api/v1/comparisons/{result["id"]}') == result
+    check_detailed(s, result)
 
 
 def browse(s):

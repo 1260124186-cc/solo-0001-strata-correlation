@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"net/http"
 )
 
@@ -54,18 +55,35 @@ func (h *Handler) comparisons(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) csv(w http.ResponseWriter, r *http.Request) {
+	q, err := query(r.URL.RawQuery, "format")
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	format := q.Get("format")
+	if format != "" && format != "default" && format != "detailed" {
+		h.error(w, r, geology.Invalid("format", "只支持 default 或 detailed"))
+		return
+	}
 	result, err := h.service.Comparison(r.Context(), r.PathValue("id"))
 	if err != nil {
 		h.error(w, r, err)
 		return
 	}
 	var buf bytes.Buffer
-	if err = correlation.WriteCSV(&buf, result); err != nil {
+	filename := result.ID + ".csv"
+	if format == "detailed" {
+		err = correlation.WriteDetailedCSV(&buf, result)
+		filename = result.ID + "-detailed.csv"
+	} else {
+		err = correlation.WriteCSV(&buf, result)
+	}
+	if err != nil {
 		h.error(w, r, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+result.ID+".csv\"")
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
 	w.WriteHeader(http.StatusOK)
 	w.Write(buf.Bytes())
 }
