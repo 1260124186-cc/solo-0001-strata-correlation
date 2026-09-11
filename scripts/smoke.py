@@ -243,11 +243,59 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def refine(s):
+    p = create(s, '局部修订剖面')
+    p = replace(s, p, [dict(top_mm=0, bottom_mm=4000, rock='sandstone', description='细砂', marker='凝灰'),
+                       dict(top_mm=4000, bottom_mm=10000, rock='mudstone', description='泥岩')])
+    split = f'/api/v1/profiles/{p["id"]}/layers/split'
+    merge = f'/api/v1/profiles/{p["id"]}/layers/merge'
+    s.call('POST', split, dict(expected_version=p['version'], top_mm=0, at_mm=4000, reason='边界上拆'), 422)
+    s.call('POST', split, dict(expected_version=p['version'], top_mm=0, at_mm=2500, reason='漏标志层选择'), 422)
+    s.call('POST', split, dict(expected_version=p['version'], top_mm=999, at_mm=1000, marker_side='upper', reason='无此层'), 422)
+    p = s.call('POST', split, dict(expected_version=p['version'], top_mm=0, at_mm=2500, marker_side='lower', reason='拆开砂岩层'))
+    assert [(l['top_mm'], l['bottom_mm'], l['rock'], l['marker']) for l in p['layers']] == \
+        [(0, 2500, 'sandstone', ''), (2500, 4000, 'sandstone', '凝灰'), (4000, 10000, 'mudstone', '')]
+    point = s.call('GET', f'/api/v1/profiles/{p["id"]}/at?depth_mm=2500')
+    assert point['layer']['bottom_mm'] == 4000 and point['layer']['marker'] == '凝灰'
+    coverage = s.call('GET', f'/api/v1/profiles/{p["id"]}/coverage')['coverage']
+    assert coverage['covered_mm'] == 10000 and coverage['gaps'] == []
+    # 相同岩性与描述、仅一侧有标志层时直接合回
+    p = s.call('POST', merge, dict(expected_version=p['version'], boundary_mm=2500, reason='合回原层'))
+    assert [(l['top_mm'], l['bottom_mm']) for l in p['layers']] == [(0, 4000), (4000, 10000)]
+    p = replace(s, p, [dict(top_mm=0, bottom_mm=4000, rock='sandstone', description='上砂', marker='上标志'),
+                       dict(top_mm=4000, bottom_mm=10000, rock='mudstone', description='下泥', marker='下标志')])
+    s.call('POST', merge, dict(expected_version=p['version'], boundary_mm=4000, reason='未选择保留侧'), 422)
+    s.call('POST', merge, dict(expected_version=p['version'], boundary_mm=4000, rock='upper', reason='只选岩性'), 422)
+    p = s.call('POST', merge, dict(expected_version=p['version'], boundary_mm=4000,
+                                   rock='lower', description='upper', marker='lower', reason='合并并逐字段选择'))
+    assert p['layers'] == [dict(top_mm=0, bottom_mm=10000, rock='mudstone', description='上砂', marker='下标志')]
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}/at?depth_mm=0')['layer']['description'] == '上砂'
+    diff = s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=5&to=6')
+    assert len(diff['layers']) == 3 and diff['fields'] == []
+    history = s.call('GET', f'/api/v1/profiles/{p["id"]}/history?limit=20')
+    assert history['items'][-1]['action'] == 'merge'
+    state(s, p, 'seal')
+    locked = s.call('GET', f'/api/v1/profiles/{p["id"]}')
+    s.call('POST', split, dict(expected_version=locked['version'], top_mm=0, at_mm=5000, reason='锁定后拆'), 409)
+    s.call('POST', merge, dict(expected_version=locked['version'], boundary_mm=5000, reason='锁定后合'), 409)
+    s.stop()
+    s.start()
+    assert s.call('GET', f'/api/v1/profiles/{p["id"]}') == locked
+    gappy = replace(s, create(s, '缺口局部修订'), [dict(top_mm=2000, bottom_mm=8000, rock='shale')])
+    gappy = s.call('POST', f'/api/v1/profiles/{gappy["id"]}/layers/split',
+                   dict(expected_version=gappy['version'], top_mm=2000, at_mm=5000, reason='缺口内拆层'))
+    assert s.call('GET', f'/api/v1/profiles/{gappy["id"]}/at?depth_mm=1000')['gap']['bottom_mm'] == 2000
+    coverage = s.call('GET', f'/api/v1/profiles/{gappy["id"]}/coverage')['coverage']
+    assert coverage['gaps'] == [dict(top_mm=0, bottom_mm=2000), dict(top_mm=8000, bottom_mm=10000)]
+    s.call('POST', f'/api/v1/profiles/{gappy["id"]}/layers/merge',
+           dict(expected_version=gappy['version'], boundary_mm=2000, reason='跨缺口合并'), 422)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'refine', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'refine'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

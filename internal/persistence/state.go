@@ -113,15 +113,34 @@ func (s State) Validate() error {
 func validateStep(before geology.Profile, r geology.Revision) error {
 	after := r.Profile
 	switch r.Event.Action {
-	case "metadata", "layers":
+	case "metadata", "layers", "split", "merge":
 		if before.State != geology.Draft || after.State != geology.Draft {
 			return fmt.Errorf("edited sealed revision")
 		}
-		if r.Event.Action == "layers" && before.Metadata != after.Metadata {
-			return fmt.Errorf("layers edit changed metadata")
-		}
-		if r.Event.Action == "metadata" && !reflect.DeepEqual(before.Layers, after.Layers) {
-			return fmt.Errorf("metadata edit changed layers")
+		switch r.Event.Action {
+		case "metadata":
+			if !reflect.DeepEqual(before.Layers, after.Layers) {
+				return fmt.Errorf("metadata edit changed layers")
+			}
+		case "layers":
+			// 整体替换只要求结果本身合法，步进前后没有额外结构约束。
+			if before.Metadata != after.Metadata {
+				return fmt.Errorf("layers edit changed metadata")
+			}
+		case "split":
+			if before.Metadata != after.Metadata {
+				return fmt.Errorf("split edit changed metadata")
+			}
+			if err := geology.ValidateSplitStep(before.Layers, after.Layers); err != nil {
+				return err
+			}
+		case "merge":
+			if before.Metadata != after.Metadata {
+				return fmt.Errorf("merge edit changed metadata")
+			}
+			if err := geology.ValidateMergeStep(before.Layers, after.Layers); err != nil {
+				return err
+			}
 		}
 	case "seal", "reopen":
 		expected := geology.Sealed

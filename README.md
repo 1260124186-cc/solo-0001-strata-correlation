@@ -41,6 +41,21 @@ curl -sS -X PUT "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/layers" \
 
 分层整体替换成功后版本变为 2。输入按顶部深度排序；重叠、非正厚度和越界一律拒绝。空数组可清空草拟剖面，遗漏数组或传入 `null` 会被拒绝。草拟状态允许深度缺口，锁定前必须完整覆盖 `[0, depth_mm)`。
 
+草拟剖面还支持两种局部修订，都不需要重新上传完整数组，并且与整体替换共用同一套校验、版本和事件语义：
+
+```bash
+curl -sS -X POST "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/layers/split" \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version":2,"top_mm":0,"at_mm":2500,"marker_side":"lower","reason":"细分砂岩层"}'
+curl -sS -X POST "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/layers/merge" \
+  -H 'Content-Type: application/json' \
+  -d '{"expected_version":3,"boundary_mm":4000,"rock":"upper","description":"lower","reason":"合并相邻层"}'
+```
+
+`POST /layers/split` 用 `top_mm` 指定要拆开的分层（其顶部深度），`at_mm` 给出严格位于该层内部的拆分深度；两半保留原岩性和描述。该层没有标志层时不需要也不能提供 `marker_side`；带标志层时必须用 `marker_side: "upper" | "lower"` 明确标志层落在哪一边。
+
+`POST /layers/merge` 合并在 `boundary_mm` 处严格相邻（顶底相接、中间无缺口）的两层；跨缺口修订仍需使用整体替换。相邻两层的岩性或描述不一致时，必须分别用 `rock`、`description` 明确保留 `upper` 还是 `lower`；两侧一致时无需提供，提供反而会被拒绝。标志层只有在两层都带标志层（名称必然不同）时才需要用 `marker` 选择；仅一侧有标志层时自动保留。每次局部修订生成一个新版本，事件动作为 `split` 或 `merge`；校验失败不改变任何层，已锁定剖面一律返回 409。
+
 ```bash
 curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/coverage"
 curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/at?depth_mm=4000"
@@ -82,6 +97,8 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `GET /profiles/{id}` | 当前完整剖面 |
 | `PUT /profiles/{id}` | `expected_version, reason, metadata` 整体替换元数据 |
 | `PUT /profiles/{id}/layers` | `expected_version, reason, layers` 整体替换分层 |
+| `POST /profiles/{id}/layers/split` | `expected_version, top_mm, at_mm, marker_side, reason` 拆开一层 |
+| `POST /profiles/{id}/layers/merge` | `expected_version, boundary_mm, rock, description, marker, reason` 合并相邻两层 |
 | `GET /profiles/{id}/coverage` | 缺口、各岩性厚度和能否锁定 |
 | `GET /profiles/{id}/at` | 必填 `depth_mm`，可选 `version`；返回所属层或缺口 |
 | `POST /profiles/{id}/seal` | `expected_version, reason`，锁定当前版本 |
