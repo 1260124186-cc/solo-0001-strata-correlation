@@ -22,6 +22,10 @@
     {
       "workflow_id": "browse",
       "command": "python3 scripts/smoke.py browse"
+    },
+    {
+      "workflow_id": "attest",
+      "command": "python3 scripts/smoke.py attest"
     }
   ]
 }

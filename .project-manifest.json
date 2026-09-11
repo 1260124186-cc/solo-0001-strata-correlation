@@ -9,6 +9,16 @@
       "responsibility": "service lifecycle"
     },
     {
+      "id": "keygen",
+      "path": "cmd/strata-keygen",
+      "responsibility": "Ed25519 issuing key generation"
+    },
+    {
+      "id": "verify",
+      "path": "cmd/strata-verify",
+      "responsibility": "offline credential verification"
+    },
+    {
       "id": "api",
       "path": "internal/api",
       "responsibility": "HTTP protocol"
@@ -16,7 +26,7 @@
     {
       "id": "catalog",
       "path": "internal/catalog",
-      "responsibility": "profile workflows"
+      "responsibility": "profile and credential workflows"
     },
     {
       "id": "geology",
@@ -26,12 +36,22 @@
     {
       "id": "correlation",
       "path": "internal/correlation",
-      "responsibility": "interval alignment"
+      "responsibility": "interval alignment and single CSV byte source"
+    },
+    {
+      "id": "attest",
+      "path": "internal/attest",
+      "responsibility": "credential and revocation list signing"
+    },
+    {
+      "id": "signing",
+      "path": "internal/signing",
+      "responsibility": "Ed25519 key loading and verification"
     },
     {
       "id": "persistence",
       "path": "internal/persistence",
-      "responsibility": "atomic snapshots and recovery"
+      "responsibility": "atomic snapshots, credential consistency and recovery"
     },
     {
       "id": "config",
@@ -121,6 +141,28 @@
         "api",
         "catalog",
         "geology",
+        "persistence"
+      ]
+    },
+    {
+      "id": "attest",
+      "name": "凭据签发与离线核验",
+      "entry": "POST /api/v1/comparisons/{id}/credential",
+      "steps": [
+        "render the single CSV byte source",
+        "sign export digest with Ed25519 key",
+        "revoke and resign CRL",
+        "verify offline against public key"
+      ],
+      "success": "verifiable credential with definite expiry and revocation verdicts",
+      "failure": "altered bytes, mismatched key or tampered snapshot rejected at startup",
+      "verification": "bounded HTTP workflow plus offline strata-verify check",
+      "module_ids": [
+        "api",
+        "catalog",
+        "correlation",
+        "attest",
+        "signing",
         "persistence"
       ]
     }

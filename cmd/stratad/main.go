@@ -9,6 +9,7 @@ import (
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/catalog"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/config"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/persistence"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/signing"
 	"log/slog"
 	"net"
 	"net/http"
@@ -31,8 +32,19 @@ func run() error {
 		return err
 	}
 	defer repo.Close()
+	// The issuing key is mandatory: it never crosses the HTTP API, it is
+	// loaded from a local file and every persisted signature must verify
+	// under it before the service accepts traffic.
+	signer, err := signing.LoadPrivateKey(c.SigningKeyPath)
+	if err != nil {
+		return err
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	handler := api.New(catalog.New(repo), logger)
+	service := catalog.New(repo, signer)
+	if err = service.BootstrapSignatures(context.Background()); err != nil {
+		return err
+	}
+	handler := api.New(service, logger)
 	listener, err := net.Listen("tcp", c.Addr)
 	if err != nil {
 		return err

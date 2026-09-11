@@ -3,19 +3,38 @@ package persistence
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/attest"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"reflect"
+	"time"
 )
 
 type State struct {
 	Schema      int                           `json:"schema"`
 	Histories   map[string][]geology.Revision `json:"histories"`
 	Comparisons map[string]correlation.Result `json:"comparisons"`
+	// Credentials maps credential id to the signed export credential.
+	Credentials map[string]attest.Credential `json:"credentials"`
+	// Revocations is the append-only source list reflected by the signed CRL.
+	Revocations []attest.Revocation `json:"revocations"`
+	// CRLVersion advances only when a revocation entry is appended; time-only
+	// CRL refreshes keep the version stable.
+	CRLVersion int `json:"crl_version"`
+	// CRL is the signed revocation list mirroring Revocations.
+	CRL attest.CRL `json:"crl"`
 }
 
+const currentSchema = 2
+
 func emptyState() State {
-	return State{Schema: 1, Histories: map[string][]geology.Revision{}, Comparisons: map[string]correlation.Result{}}
+	return State{
+		Schema:      currentSchema,
+		Histories:   map[string][]geology.Revision{},
+		Comparisons: map[string]correlation.Result{},
+		Credentials: map[string]attest.Credential{},
+		Revocations: []attest.Revocation{},
+	}
 }
 
 func (s State) Clone() State {
@@ -30,7 +49,17 @@ func (s State) Clone() State {
 	for id, result := range s.Comparisons {
 		out.Comparisons[id] = result.Clone()
 	}
+	for id, credential := range s.Credentials {
+		out.Credentials[id] = cloneCredential(credential)
+	}
+	out.Revocations = append(out.Revocations, s.Revocations...)
+	out.CRLVersion = s.CRLVersion
+	out.CRL = s.CRL
 	return out
+}
+
+func cloneCredential(cred attest.Credential) attest.Credential {
+	return cred
 }
 
 func (s State) Latest(id string) (geology.Profile, error) {
@@ -53,7 +82,7 @@ func (s State) Revision(id string, version int) (geology.Revision, error) {
 }
 
 func (s State) Validate() error {
-	if s.Schema != 1 || s.Histories == nil || s.Comparisons == nil {
+	if s.Schema != currentSchema || s.Histories == nil || s.Comparisons == nil || s.Credentials == nil || s.Revocations == nil {
 		return fmt.Errorf("unsupported snapshot shape")
 	}
 	for id, history := range s.Histories {
@@ -107,7 +136,118 @@ func (s State) Validate() error {
 			return fmt.Errorf("comparison data mismatch")
 		}
 	}
+	if err := s.validateCredentials(); err != nil {
+		return err
+	}
+	return s.validateRevocations()
+}
+
+// validateCredentials checks every credential structurally and re-derives its
+// binding to the exact CSV export bytes. Signature verification against the
+// configured key happens separately in VerifySignatures.
+func (s State) validateCredentials() error {
+	for id, cred := range s.Credentials {
+		p := cred.Payload
+		if id != p.CredentialID {
+			return fmt.Errorf("invalid credential identity %s", id)
+		}
+		if !validAttID(id) {
+			return fmt.Errorf("invalid credential id %s", id)
+		}
+		if p.Version != 1 || p.Kind != "strata-comparison-credential" || p.IssuerKeyID == "" {
+			return fmt.Errorf("invalid credential shape %s", id)
+		}
+		result, exists := s.Comparisons[p.ComparisonID]
+		if !exists {
+			return fmt.Errorf("credential %s references missing comparison", id)
+		}
+		digest, content, err := correlation.ContentDigest(result)
+		if err != nil {
+			return err
+		}
+		if p.ContentDigest != digest || p.ContentLength != len(content) {
+			return fmt.Errorf("credential %s does not cover the current export bytes", id)
+		}
+		if p.ExportVersion != correlation.ExportVersion || p.ContentType != correlation.CSVContentType {
+			return fmt.Errorf("credential %s binds an unknown export format", id)
+		}
+		if p.IssuedAt.IsZero() || !p.IssuedAt.Equal(p.NotBefore) || !p.ExpiresAt.After(p.IssuedAt) {
+			return fmt.Errorf("credential %s has invalid validity window", id)
+		}
+		if want := attest.CredentialID(p.ComparisonID, content, p.IssuedAt); want != id {
+			return fmt.Errorf("credential %s identity does not match signed content", id)
+		}
+		if cred.Signature == "" {
+			return fmt.Errorf("credential %s is not signed", id)
+		}
+	}
 	return nil
+}
+
+func (s State) validateRevocations() error {
+	seen := map[string]bool{}
+	var previous time.Time
+	for i, entry := range s.Revocations {
+		if !validAttID(entry.CredentialID) {
+			return fmt.Errorf("invalid revocation id at %d", i)
+		}
+		if seen[entry.CredentialID] {
+			return fmt.Errorf("credential %s revoked twice", entry.CredentialID)
+		}
+		seen[entry.CredentialID] = true
+		cred, exists := s.Credentials[entry.CredentialID]
+		if !exists {
+			return fmt.Errorf("revocation references missing credential %s", entry.CredentialID)
+		}
+		if entry.ComparisonID != cred.Payload.ComparisonID {
+			return fmt.Errorf("revocation comparison mismatch for %s", entry.CredentialID)
+		}
+		if entry.RevokedAt.IsZero() {
+			return fmt.Errorf("revocation for %s has no timestamp", entry.CredentialID)
+		}
+		if i > 0 && !entry.RevokedAt.After(previous) {
+			return fmt.Errorf("revocation timestamps must be strictly increasing")
+		}
+		previous = entry.RevokedAt
+	}
+	if s.CRL.Signature == "" {
+		if len(s.Revocations) != 0 {
+			return fmt.Errorf("revocations exist without a signed list")
+		}
+		return nil
+	}
+	p := s.CRL.Payload
+	if p.Version < 1 || p.Kind != "strata-revocation-list" || p.IssuerKeyID == "" {
+		return fmt.Errorf("invalid revocation list shape")
+	}
+	if s.CRLVersion != p.Version || s.CRLVersion != len(s.Revocations)+1 {
+		return fmt.Errorf("revocation list version is out of sync")
+	}
+	if !p.NextUpdate.Equal(p.ThisUpdate.Add(attest.CRLNextUpdateWindow)) {
+		return fmt.Errorf("revocation list window has been altered")
+	}
+	if len(p.Revocations) != len(s.Revocations) {
+		return fmt.Errorf("signed revocation list is out of sync")
+	}
+	for i, entry := range s.Revocations {
+		if !reflect.DeepEqual(entry, p.Revocations[i]) {
+			return fmt.Errorf("signed revocation list is out of sync")
+		}
+	}
+	return nil
+}
+
+func validAttID(id string) bool {
+	const prefix = "att_"
+	if len(id) != len(prefix)+32 || id[:len(prefix)] != prefix {
+		return false
+	}
+	for _, c := range id[len(prefix):] {
+		if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func validateStep(before geology.Profile, r geology.Revision) error {

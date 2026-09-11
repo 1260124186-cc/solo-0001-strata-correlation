@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/correlation"
 	"net/http"
 )
@@ -59,13 +58,22 @@ func (h *Handler) csv(w http.ResponseWriter, r *http.Request) {
 		h.error(w, r, err)
 		return
 	}
-	var buf bytes.Buffer
-	if err = correlation.WriteCSV(&buf, result); err != nil {
+	// Credential issuance signs these exact bytes; reuse the one and only
+	// renderer so downloads can never diverge from what was signed.
+	data, err := correlation.CSVBytes(result)
+	if err != nil {
 		h.error(w, r, err)
 		return
 	}
-	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+result.ID+".csv\"")
+	digest, _, err := correlation.ContentDigest(result)
+	if err != nil {
+		h.error(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", correlation.CSVContentType)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+result.ID+`.csv"`)
+	w.Header().Set("Digest", "sha-256="+digest)
+	w.Header().Set("X-Content-SHA256", digest)
 	w.WriteHeader(http.StatusOK)
-	w.Write(buf.Bytes())
+	w.Write(data)
 }

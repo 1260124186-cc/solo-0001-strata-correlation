@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/attest"
 	"io"
 	"os"
 	"path/filepath"
@@ -45,10 +46,26 @@ func readSnapshot(path string) (State, error) {
 	if err = json.Unmarshal(env.Data, &state); err != nil {
 		return State{}, err
 	}
+	state = migrate(state)
 	if err = state.Validate(); err != nil {
 		return State{}, fmt.Errorf("snapshot validation: %w", err)
 	}
 	return state, nil
+}
+
+// migrate upgrades snapshots written by older baselines. Schema 1 predates
+// signing; its empty credential stores simply need to be initialized.
+func migrate(state State) State {
+	if state.Schema == 1 {
+		state.Schema = currentSchema
+	}
+	if state.Credentials == nil {
+		state.Credentials = map[string]attest.Credential{}
+	}
+	if state.Revocations == nil {
+		state.Revocations = []attest.Revocation{}
+	}
+	return state
 }
 
 // A rename is the commit point. After it, callers must use the new state even

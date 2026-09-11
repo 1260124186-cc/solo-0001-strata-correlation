@@ -4,15 +4,42 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/attest"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/geology"
 	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/persistence"
+	"github.com/1260124186-cc/solo-0001-strata-correlation/internal/signing"
 	"strings"
 	"time"
 )
 
-type Service struct{ repo *persistence.Repository }
+type Service struct {
+	repo   *persistence.Repository
+	signer *signing.Signer
+	issuer *attest.Issuer
+	now    func() time.Time
+}
 
-func New(repo *persistence.Repository) *Service { return &Service{repo: repo} }
+// New wires the service with its issuing key. The key is required: without it
+// the service cannot start, because comparison exports must be signable and
+// persisted credentials must be verifiable against the configured key.
+func New(repo *persistence.Repository, signer *signing.Signer) *Service {
+	return &Service{
+		repo:   repo,
+		signer: signer,
+		issuer: attest.NewIssuer(signerAdapter{signer}),
+		now:    func() time.Time { return time.Now().UTC() },
+	}
+}
+
+// signerAdapter adapts signing.Signer (which exposes KeyID/Sign through
+// concrete methods) to the attest.Signer interface.
+type signerAdapter struct{ s *signing.Signer }
+
+func (a signerAdapter) KeyID() string        { return a.s.KeyID }
+func (a signerAdapter) Sign(m []byte) []byte { return a.s.Sign(m) }
+
+// SignerKey reports the configured issuing key identifier.
+func (s *Service) SignerKey() *signing.Signer { return s.signer }
 
 func newID() (string, error) {
 	bytes := make([]byte, 16)

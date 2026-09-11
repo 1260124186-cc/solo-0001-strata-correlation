@@ -3,6 +3,8 @@
 import argparse
 import concurrent.futures
 import csv
+import datetime as _dt
+import hashlib
 import io
 import json
 import os
@@ -19,13 +21,21 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class Server:
-    def __init__(self, directory):
+    def __init__(self, directory, key_path=None):
         self.directory = Path(directory)
         self.binary = self.directory / 'stratad'
+        self.verifier = self.directory / 'strata-verify'
+        self.keygen = self.directory / 'strata-keygen'
         args = ['go', 'build']
         if os.environ.get('STRATA_SMOKE_RACE') == '1':
             args.append('-race')
         subprocess.run(args + ['-o', str(self.binary), './cmd/stratad'], cwd=ROOT, check=True, timeout=60)
+        subprocess.run(['go', 'build', '-o', str(self.verifier), './cmd/strata-verify'], cwd=ROOT, check=True, timeout=60)
+        subprocess.run(['go', 'build', '-o', str(self.keygen), './cmd/strata-keygen'], cwd=ROOT, check=True, timeout=60)
+        self.key_path = Path(key_path) if key_path else self.directory / 'signing.pem'
+        if key_path is None:
+            subprocess.run([str(self.keygen), '-out', str(self.key_path), '-force'],
+                           cwd=ROOT, check=True, timeout=30, stdout=subprocess.DEVNULL)
         self.process = None
         self.log = open(self.directory / 'server.log', 'w+')
         try:
@@ -39,7 +49,8 @@ class Server:
 
     def start(self):
         self.process = subprocess.Popen(
-            [str(self.binary), '-addr', '127.0.0.1:0', '-data', str(self.directory / 'data')],
+            [str(self.binary), '-addr', '127.0.0.1:0', '-data', str(self.directory / 'data'),
+             '-signing-key', str(self.key_path)],
             stdout=subprocess.PIPE, stderr=self.log, text=True,
         )
         with selectors.DefaultSelector() as selector:
@@ -157,7 +168,7 @@ def record(s):
     damaged = json.loads(original)
     damaged['digest'] = '0' * 64
     snapshot.write_text(json.dumps(damaged))
-    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(s.directory/'data')], capture_output=True, timeout=10)
+    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(s.directory/'data'), '-signing-key', str(s.key_path)], capture_output=True, timeout=10)
     assert attempt.returncode != 0 and b'checksum mismatch' in attempt.stderr
     snapshot.write_bytes(original)
     s.start()
@@ -192,7 +203,7 @@ def seal(s):
     diff = s.call('GET', f'/api/v1/profiles/{p["id"]}/diff?from=3&to=5')
     assert {f['field'] for f in diff['fields']} >= {'state', 'name'}
     assert diff['layers'] == []
-    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(s.directory/'data')], capture_output=True, timeout=10)
+    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(s.directory/'data'), '-signing-key', str(s.key_path)], capture_output=True, timeout=10)
     assert attempt.returncode != 0 and b'already in use' in attempt.stderr
     s.stop()
     s.start()
@@ -243,11 +254,142 @@ def browse(s):
     assert len(diff['layers']) == 2
 
 
+def attest(s):
+    a, b = sealed(s, '凭据西剖面'), sealed(s, '凭据东剖面', 6000)
+    request = dict(left=dict(id=a['id'], version=3), right=dict(id=b['id'], version=3), offset_mm=0)
+    comparison = s.call('POST', '/api/v1/comparisons', request, 201)
+    cid = comparison['id']
+    s.call('POST', f'/api/v1/comparisons/prf_{"0"*32}/credential', {}, expected=404)
+    issued = s.call('POST', f'/api/v1/comparisons/{cid}/credential', dict(ttl_hours=168), 201)
+    cred_id = issued['credential']['payload']['credential_id']
+    assert issued['content_type'] == 'text/csv; charset=utf-8'
+    assert issued['digest'] and issued['content_length'] > 0
+    # A second issuance while the first is live is rejected; the credential must be explicit.
+    s.call('POST', f'/api/v1/comparisons/{cid}/credential', {}, expected=409)
+    s.call('POST', f'/api/v1/comparisons/{cid}/credential', dict(ttl_hours=90000), expected=422)
+    # The single export source: downloaded bytes must match what was signed.
+    csv_bytes = s.call('GET', f'/api/v1/comparisons/{cid}/csv', raw=True).encode()
+    assert hashlib.sha256(csv_bytes).hexdigest() == issued['digest']
+    assert len(csv_bytes) == issued['content_length']
+    # Public key is published; private key never appears in API responses.
+    key_info = s.call('GET', '/api/v1/signing-key')
+    assert key_info['algorithm'] == 'Ed25519' and 'BEGIN PUBLIC KEY' in key_info['public_key_pem']
+    workdir = s.directory / 'verify'
+    workdir.mkdir(exist_ok=True)
+    public_path = workdir / 'public.pem'
+    public_path.write_text(key_info['public_key_pem'])
+    cred_path = workdir / 'credential.json'
+    cred_path.write_text(json.dumps(issued['credential'], ensure_ascii=False))
+    csv_path = workdir / 'comparison.csv'
+    csv_path.write_bytes(csv_bytes)
+    crl = s.call('GET', '/api/v1/revocation-list')
+    assert crl['payload']['revocations'] == [] and crl['signature']
+    assert crl['payload']['version'] == 1
+    crl_path = workdir / 'crl.json'
+    crl_path.write_text(json.dumps(crl))
+    assert s.call('GET', f'/api/v1/comparisons/{cid}/credential')['payload']['credential_id'] == cred_id
+    assert s.call('GET', f'/api/v1/credentials/{cred_id}') == issued['credential']
+
+    def run_verifier(now=None, crl_override=None, content_override=None, public_override=None):
+        args = [str(s.verifier), '-public', str(public_override or public_path),
+                '-credential', str(cred_path),
+                '-content', str(content_override or csv_path),
+                '-crl', str(crl_override or crl_path)]
+        if now:
+            args += ['-now', now]
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=15)
+        result = json.loads(proc.stdout)
+        return proc.returncode, result
+
+    code, result = run_verifier()
+    assert code == 0 and result['verdict'] == 'valid', result
+    # One changed byte anywhere in the actual export must fail verification.
+    altered = workdir / 'altered.csv'
+    tampered = bytearray(csv_bytes)
+    tampered[-2] ^= 0x01
+    altered.write_bytes(bytes(tampered))
+    code, result = run_verifier(content_override=altered)
+    assert code == 1 and result['verdict'] == 'invalid', result
+    # An unrelated public key cannot validate the signature.
+    other_private = workdir / 'other.pem'
+    other_public = workdir / 'other-public.pem'
+    subprocess.run([str(s.keygen), '-out', str(other_private), '-public-out', str(other_public), '-force'],
+                   check=True, stdout=subprocess.DEVNULL, timeout=30)
+    code, result = run_verifier(public_override=other_public)
+    assert code == 1 and result['verdict'] == 'invalid' and '密钥' in result['reason'], result
+    # Expiry yields a definite conclusion.
+    code, result = run_verifier(now='2030-01-01T00:00:00Z')
+    assert code == 2 and result['verdict'] == 'expired', result
+    # Past the CRL window the service refuses to vouch for revocation status.
+    next_update = _dt.datetime.fromisoformat(crl['payload']['next_update'].replace('Z', '+00:00'))
+    future = (next_update + _dt.timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    code, result = run_verifier(now=future)
+    assert code == 4 and result['verdict'] == 'crl_stale', result
+    # Revocation is immediately visible in a freshly signed list.
+    revoked_crl = s.call('POST', f'/api/v1/credentials/{cred_id}/revoke', dict(reason='资料勘误'))['crl']
+    assert len(revoked_crl['payload']['revocations']) == 1
+    assert revoked_crl['payload']['version'] == 2
+    crl_path.write_text(json.dumps(revoked_crl))
+    code, result = run_verifier()
+    assert code == 3 and result['verdict'] == 'revoked' and result['revoke_reason'] == '资料勘误', result
+    # Revoking twice is rejected.
+    s.call('POST', f'/api/v1/credentials/{cred_id}/revoke', dict(reason='再次吊销'), expected=409)
+    # After revocation a replacement credential can be issued, and it verifies.
+    replacement = s.call('POST', f'/api/v1/comparisons/{cid}/credential', dict(ttl_hours=1), 201)
+    assert replacement['credential']['payload']['credential_id'] != cred_id
+    cred_path.write_text(json.dumps(replacement['credential']))
+    crl2 = s.call('GET', '/api/v1/revocation-list')
+    crl_path.write_text(json.dumps(crl2))
+    code, result = run_verifier()
+    assert code == 0 and result['verdict'] == 'valid', result
+    # Restart must re-verify every persisted signature and keep serving.
+    s.stop()
+    s.start()
+    # A time-only CRL refresh at startup must not advance the version.
+    assert s.call('GET', '/api/v1/revocation-list')['payload']['version'] == 2
+    assert s.call('GET', f'/api/v1/credentials/{cred_id}')['payload']['credential_id'] == cred_id
+    code, _ = run_verifier()
+    assert code == 0
+    # The revoked credential keeps its definite conclusion across restart too.
+    cred_path.write_text(json.dumps(issued['credential']))
+    code, _ = run_verifier()
+    assert code == 3
+    # Startup without the issuing key is refused with a clear reason.
+    s.stop()
+    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(s.directory/'data')],
+                             capture_output=True, timeout=10)
+    assert attempt.returncode != 0 and '未配置签发私钥' in attempt.stderr.decode()
+    # Startup with a different key is refused because data does not match the key.
+    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(s.directory/'data'),
+                              '-signing-key', str(other_private)], capture_output=True, timeout=10)
+    assert attempt.returncode != 0 and ('其他签发密钥' in attempt.stderr.decode() or '签名核验失败' in attempt.stderr.decode())
+    # Tampering with a persisted credential signature is rejected at startup.
+    # The outer snapshot digest is recomputed so only the inner Ed25519
+    # signature is broken, exercising key-based verification specifically.
+    snapshot = s.directory / 'data' / 'strata.json'
+    original = snapshot.read_bytes()
+    envelope = json.loads(original)
+    first = next(iter(envelope['data']['credentials']))
+    envelope['data']['credentials'][first]['signature'] = '00' * 64
+    data_raw = json.dumps(envelope['data'], ensure_ascii=False, separators=(',', ':')).encode()
+    envelope['digest'] = hashlib.sha256(data_raw).hexdigest()
+    snapshot.write_bytes(json.dumps(envelope, ensure_ascii=False, separators=(',', ':')).encode())
+    attempt = subprocess.run([str(s.binary), '-addr', '127.0.0.1:0', '-data', str(s.directory/'data'),
+                              '-signing-key', str(s.key_path)], capture_output=True, timeout=10)
+    assert attempt.returncode != 0 and '签名核验失败' in attempt.stderr.decode(), attempt.stderr.decode()
+    snapshot.write_bytes(original)
+    s.start()
+    # Switch back to the revoked credential: its conclusion must survive restart.
+    cred_path.write_text(json.dumps(issued['credential']))
+    code, _ = run_verifier()
+    assert code == 3
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'all'])
+    parser.add_argument('workflow', choices=['record', 'seal', 'compare', 'browse', 'attest', 'all'])
     args = parser.parse_args()
-    names = ['record', 'seal', 'compare', 'browse'] if args.workflow == 'all' else [args.workflow]
+    names = ['record', 'seal', 'compare', 'browse', 'attest'] if args.workflow == 'all' else [args.workflow]
     for name in names:
         with tempfile.TemporaryDirectory(prefix='strata-smoke-') as directory:
             server = Server(directory)

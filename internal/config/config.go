@@ -16,6 +16,7 @@ type Config struct {
 	Addr            string
 	DataDir         string
 	ShutdownTimeout time.Duration
+	SigningKeyPath  string
 }
 
 func env(key, fallback string) string {
@@ -31,6 +32,7 @@ func Parse(args []string, output io.Writer) (Config, error) {
 	flags.SetOutput(output)
 	flags.StringVar(&c.Addr, "addr", env("STRATA_ADDR", "127.0.0.1:8093"), "HTTP 监听地址")
 	flags.StringVar(&c.DataDir, "data", env("STRATA_DATA", "./data"), "剖面数据目录")
+	flags.StringVar(&c.SigningKeyPath, "signing-key", env("STRATA_SIGNING_KEY", ""), "Ed25519 私钥 PEM 文件，对比凭据签发必需")
 	shutdown := flags.String("shutdown", env("STRATA_SHUTDOWN", "10s"), "优雅退出期限")
 	if err := flags.Parse(args); err != nil {
 		return c, err

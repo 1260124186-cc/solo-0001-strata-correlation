@@ -12,10 +12,14 @@
 2. 锁定与修订：检查连续性、锁定版本、读取历史、重新打开并修订。锁定失败保留原状态。
 3. 对比：选定两个已经锁定的历史版本，指定右侧深度偏移，按双方边界切分共同区间，计算岩性相同长度和比例，保存不可变结果。相同输入复用同一结果。
 对比辅助接口 POST /api/v1/comparison-offsets 使用共同标志层所需偏移的中位数提供建议，并输出残差，用户显式采纳后才生成结果。
-4. 查阅：按岩性、地点、名称和状态筛选剖面，分页读取历史事件与分层；读取对比结果的 JSON 或 CSV。GET /profiles/{id}/at 可查询当前或历史版本中的某一深度；GET /profiles/{id}/diff 按区间和元数据字段展示历史差异。
+4. 签发与核验：为某条对比结果的**实际导出字节**签发 Ed25519 凭据，私钥仅来自本机 PEM 文件、不经接口收发；接收方凭公开密钥、凭据和签名吊销列表离线核验，得到有效、过期、已吊销、吊销列表过期或无效五种明确结论。一条结果同时只有一张有效凭据，可在过期或吊销后重签。
+5. 查阅：按岩性、地点、名称和状态筛选剖面，分页读取历史事件与分层；读取对比结果的 JSON 或 CSV。GET /profiles/{id}/at 可查询当前或历史版本中的某一深度；GET /profiles/{id}/diff 按区间和元数据字段展示历史差异。
 
 ## 模块与接口
-cmd/stratad 提供启动入口。internal/api 处理 HTTP；internal/catalog 编排剖面工作流；internal/geology 实现深度、状态和验证；internal/correlation 计算共同区间；internal/persistence 负责快照、锁和数据恢复；internal/config 解析环境变量和启动参数。完整接口见 README。
+cmd/stratad 提供启动入口；cmd/strata-keygen 生成签发密钥对；cmd/strata-verify 离线核验凭据。internal/api 处理 HTTP；internal/catalog 编排剖面与凭据工作流；internal/geology 实现深度、状态和验证；internal/correlation 计算共同区间并拥有唯一的 CSV 导出字节实现；internal/attest 实现凭据与吊销列表签名和离线结论；internal/signing 管理 Ed25519 密钥加载；internal/persistence 负责快照、锁和数据恢复；internal/config 解析环境变量和启动参数。完整接口见 README。
+
+## 凭据安全边界
+私钥只能通过 -signing-key 或 STRATA_SIGNING_KEY 指定的本机 PEM 文件加载，文件权限过宽、缺失或格式错误时拒绝启动；任何 HTTP 接口都不接受或返回私钥。凭据签名覆盖导出 CSV 的精确字节（SHA-256 与长度），导出渲染只能有 correlation.CSVBytes 一个实现。快照持久化凭据、吊销记录和签名吊销列表，启动时必须全部用当前密钥验签通过，并校验摘要确实由当前对比结果重新导出得到；密钥与数据不匹配或凭据被篡改时拒绝启动并说明原因。
 
 ## 验证计划
 默认 testing=deferred，不生成测试文件和测试数据。后续专项测试任务添加单元测试和浏览器无关的 API 回归测试。当前使用临时数据目录启动真实 HTTP 服务，执行编录、锁定修订、对比和查阅生产冒烟流程，并检查失败边界和重启恢复。所有检查有超时且不访问外网。

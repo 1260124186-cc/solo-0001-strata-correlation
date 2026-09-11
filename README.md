@@ -17,6 +17,7 @@ go run ./cmd/stratad -addr 127.0.0.1:8093 -data ./data
 | --- | --- | --- | --- |
 | `-addr` | `STRATA_ADDR` | `127.0.0.1:8093` | HTTP 监听地址 |
 | `-data` | `STRATA_DATA` | `./data` | 持久化目录 |
+| `-signing-key` | `STRATA_SIGNING_KEY` | 无（必填） | Ed25519 私钥 PEM 文件，凭据签发必需 |
 | `-shutdown` | `STRATA_SHUTDOWN` | `10s` | 优雅退出期限，允许 1s–1m |
 
 显式参数优先于环境变量。数据目录只能由一个服务进程打开；系统文件锁在进程退出后自动释放。默认只监听本机，适合受信任的单机部署。当前基线未包含身份验证、TLS 和跨节点复制。
@@ -69,6 +70,44 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 
 `POST /api/v1/comparison-offsets` 接收 `left`、`right` 引用，根据共同标志层给出偏移建议。标志层按忽略大小写的名称匹配，采用各标志层所需偏移的中位数；偶数项采用中间两项平均并向零取整。响应含证据、残差、是否存在分歧，以及可直接提交的 `comparison` 对象。建议不会自动创建对比结果；这是辅助地层校对的几何计算，不会推断地质年代或自动确定地层对应关系。
 
+## 对比结果凭据（可核验导出）
+
+对外发送的对比资料可以附带数字凭据，接收方只凭一份**公开密钥**、凭据和吊销列表即可**离线**确认收到的 CSV 字节未被改动，结论在过期或被吊销时仍然明确。私钥只存在于服务主机的 PEM 文件中，不经由任何接口提交或返回。
+
+首次部署先用随附工具生成 Ed25519 密钥对：
+
+```bash
+go run ./cmd/strata-keygen -out ./keys/strata.pem -public-out ./keys/strata-public.pem
+chmod 600 ./keys/strata.pem
+go run ./cmd/stratad -data ./data -signing-key ./keys/strata.pem
+```
+
+私钥文件仅允许属主读写（建议 `0600`），权限过宽、文件缺失、格式错误或快照中的凭据无法用该密钥核验时，服务**拒绝启动**并输出原因。公开密钥可通过 `GET /api/v1/signing-key` 获取，也直接分发 `strata-public.pem`。
+
+签发针对的是**实际导出的字节**：凭据载荷包含 `SHA-256(CSV 字节)`、字节长度、内容类型和导出格式版本。系统内只有一个 CSV 渲染实现（`correlation.CSVBytes`），HTTP 下载和凭据签发共用它，不存在第二处导出代码使签名与下载内容脱节。改动 CSV 中任意一个字节都会导致离线核验失败；仅核对结果编号或摘要字段不算核验。
+
+```bash
+# 1) 为某条对比结果签发凭据（默认有效期 30 天，可用 ttl_hours 指定 1–2160 小时）
+curl -sS -X POST http://127.0.0.1:8093/api/v1/comparisons/<cmp-id>/credential \
+  -H 'Content-Type: application/json' -d '{"ttl_hours":168}' > credential.json
+# 2) 取得唯一内容来源的 CSV（响应头 X-Content-SHA256/Digest 即凭据所覆盖的摘要）
+curl -sS http://127.0.0.1:8093/api/v1/comparisons/<cmp-id>/csv -o comparison.csv
+# 3) 取得公开密钥与当前吊销列表（随资料一起分发给接收方）
+curl -sS http://127.0.0.1:8093/api/v1/signing-key -o key.json
+curl -sS http://127.0.0.1:8093/api/v1/revocation-list -o crl.json
+```
+
+接收方离线核验（`strata-verify`，不需要联网或访问本服务）：
+
+```bash
+go run ./cmd/strata-verify -public strata-public.pem \
+  -credential credential.json -content comparison.csv -crl crl.json
+```
+
+核验结论与退出码：`0 valid`（签名有效、字节一致、在有效期内且未被吊销）、`2 expired`（凭据已过期）、`3 revoked`（已在签名吊销列表中登记）、`4 crl_stale`（吊销列表超过 24 小时权威窗口，无法离线确认吊销状态）、`1 invalid`（签名错误、字节被改动、格式不符或密钥不匹配）。输出为单行 JSON，含结论与原因。
+
+一条对比结果同时只能有一张有效且未吊销的凭据；凭据过期或被吊销后才能重新签发。吊销通过 `POST /api/v1/credentials/{id}/revoke` 登记，服务立即生成新版本的**签名吊销列表**（CRL）。CRL 自身带 Ed25519 签名和 `next_update`（签发后 24 小时），过期后核验端给出 `crl_stale` 而不是假装未被吊销；服务端在窗口过半时自动重签。凭据与 CRL 均随快照持久化，启动时逐张重新验签，密钥更换或数据被改动都会拒绝启动。
+
 ## HTTP 接口
 
 接口统一前缀 `/api/v1`，请求体类型 `application/json`，最大 4 MiB；拒绝未知 JSON 字段及多个连续 JSON 对象。应用错误采用 `{"error":{"code":"invalid","field":"depth_mm","detail":"..."}}`。HTTP 422 表示字段错误，409 表示状态或版本冲突，404 表示资源缺失，415 表示请求类型错误，413 表示体积超限，500 表示内部故障。不存在的路由和不支持的方法使用 Go HTTP 的 404/405 响应。
@@ -93,7 +132,13 @@ curl -sS "http://127.0.0.1:8093/api/v1/profiles/<profile-id>/seal" \
 | `POST /comparisons` | `left, right, offset_mm`，生成或复用对比 |
 | `GET /comparisons` | 可选 `profile_id, offset, limit` |
 | `GET /comparisons/{id}` | 已保存的完整对比结果 |
-| `GET /comparisons/{id}/csv` | 区间 CSV |
+| `GET /comparisons/{id}/csv` | 区间 CSV（唯一导出字节源，带摘要响应头） |
+| `POST /comparisons/{id}/credential` | 可选 `ttl_hours`，为 CSV 字节签发凭据 |
+| `GET /comparisons/{id}/credential` | 该对比结果当前有效的凭据 |
+| `GET /credentials/{id}` | 按编号读取凭据（含已过期或已吊销） |
+| `POST /credentials/{id}/revoke` | 吊销凭据并生成新版签名吊销列表 |
+| `GET /revocation-list` | 当前签名吊销列表（CRL） |
+| `GET /signing-key` | 公开密钥 PEM 与密钥标识 |
 
 上表只有 `/healthz` 位于前缀外。查询字段 `q` 匹配剖面名称，`site` 匹配地点，两者采用不区分大小写的子串匹配。省略 `state` 返回所有状态。列表按更新时间倒序、编号升序稳定排列。分页默认 20、最大 100 条，越过尾端返回空数组；列表接口拒绝未知和重复查询字段。
 
@@ -116,21 +161,26 @@ go build ./...
 go vet ./...
 python3 scripts/smoke.py all
 STRATA_SMOKE_RACE=1 python3 scripts/smoke.py seal
+STRATA_SMOKE_RACE=1 python3 scripts/smoke.py attest
 ```
 
 **测试模式为 `deferred`**：当前初始化基线有意不生成单元测试、测试数据或专用测试套件；后续“代码测试”任务补充这些内容。`scripts/smoke.py` 是有超时的运行验证入口，它在临时目录编译并启动真实 HTTP 服务、通过本机回环 HTTP 连接完成操作，然后关闭服务并清理临时数据。不会访问外网或修改现有数据目录。也可分别运行 `record / seal / compare / browse` 四个流程。
 
-验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页。
+验证覆盖编录成功与深度失败边界、锁定与重新打开、并发版本冲突、历史不变性、数据目录独占、重启恢复、区间相似度、未知岩性、偏移建议、CSV、列表筛选与分页，以及凭据签发、离线核验（改动字节/换密钥/过期/吊销列表过期/吊销/重启恢复）和缺密钥、错密钥、凭据被篡改时拒绝启动。
 
 ## 目录
 
 ```text
 cmd/stratad/          启动、信号和 HTTP 服务生命周期
+cmd/strata-keygen/    生成 Ed25519 签发密钥对
+cmd/strata-verify/    凭据离线核验，输出 valid/expired/revoked/crl_stale/invalid
 internal/api/        JSON、路由、查询参数和请求记录
-internal/catalog/    编录、修订、查阅和对比工作流
+internal/catalog/    编录、修订、查阅、对比和凭据工作流
 internal/geology/    分层规则、覆盖、深度查询和版本差异
-internal/correlation/区间对比、标志层偏移与 CSV
-internal/persistence/快照校验、原子替换、独占锁
+internal/correlation/区间对比、标志层偏移与唯一 CSV 字节源
+internal/attest/     凭据与吊销列表的签名、规范编码和离线结论
+internal/signing/    Ed25519 私钥加载、公钥 PEM 和验签
+internal/persistence/快照校验、原子替换、独占锁与凭据一致性校验
 internal/config/     环境变量与启动参数
 scripts/smoke.py      临时环境 HTTP 运行验证
 ```
